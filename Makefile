@@ -12,7 +12,7 @@ CXX         := clang++
 LD          := ld.lld
 
 LIBS := -lc -lkernel -lc++ -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp \
-        -lSceAppInstUtil -lSceBgft -lSceVideoOut -lScePad -lSDL2
+        -lSceAppInstUtil -lSceBgft -lSceVideoOut -lSceAudioOut -lScePad -lSDL2
 CFLAGS   := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -DORBIS -D_GNU_SOURCE \
             -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS := $(CFLAGS) -std=c++11 -fexceptions -fcxx-exceptions -isystem $(TOOLCHAIN)/include/c++/v1
