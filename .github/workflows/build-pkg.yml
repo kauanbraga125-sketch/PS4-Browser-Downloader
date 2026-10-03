@@ -1,0 +1,72 @@
+name: Build PS4 Browser Downloader PKG
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 make curl tar python3
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+
+      - name: Download OpenOrbis v0.5.4
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-all-errors \
+            https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz \
+            -o toolchain.tar.gz
+          echo '3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526  toolchain.tar.gz' | sha256sum -c -
+          mkdir -p .openorbis
+          tar xzf toolchain.tar.gz -C .openorbis
+          LINK_X=$(find "$GITHUB_WORKSPACE/.openorbis" -type f -name link.x -print -quit)
+          test -n "$LINK_X"
+          echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
+
+      - name: Compile eboot
+        run: |
+          set -euxo pipefail
+          chmod +x "$OO_PS4_TOOLCHAIN/bin/linux/"* || true
+          make CC=clang-18 CXX=clang++-18 LD=ld.lld-18 eboot.bin
+          test -s eboot.bin
+
+      - name: Package PKG
+        run: |
+          set -euxo pipefail
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          docker run --rm --user 0:0 \
+            --env OO_PS4_TOOLCHAIN=/opt/openorbis \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$OO_PS4_TOOLCHAIN:/opt/openorbis" \
+            --workdir /work ubuntu:20.04 bash -lc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
+              make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
+            '
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_Downloader_v1.0.pkg
+          sha256sum PS4_Browser_Downloader_v1.0.pkg > PS4_Browser_Downloader_v1.0.pkg.sha256
+
+      - name: Upload PKG
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS4-Browser-Downloader-PS4
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            PS4_Browser_Downloader_v1.0.pkg
+            PS4_Browser_Downloader_v1.0.pkg.sha256
