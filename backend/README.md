@@ -53,3 +53,15 @@ decodifica o PNG e desenha diretamente em 1920x1080 via SDL. Controle:
 
 Downloads concluidos pelo Chromium sao detectados automaticamente pelo cliente nativo
 e enviados a BGFT (PKG) ou ao daemon de arquivos comuns.
+
+
+## Inicializador Windows v7.3.1
+
+Use `start_windows.bat`. A janela deve permanecer aberta enquanto o PS4 estiver usando o navegador.
+
+Se Node.js, npm, Playwright ou Chromium falharem, o iniciador não fecha silenciosamente:
+- mostra a etapa que falhou;
+- grava tudo em `backend_start.log`;
+- mantém uma janela de comando aberta para leitura.
+
+Se o backend estiver realmente pronto, a janela não volta ao prompt e o log deve conter as mensagens de inicialização do servidor nas portas TCP 32124 e UDP 32123.
