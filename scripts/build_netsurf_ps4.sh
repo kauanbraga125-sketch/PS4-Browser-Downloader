@@ -408,8 +408,14 @@ static bool ps4_open_url_keyboard(struct gui_window *gw)
     param.maxTextLength = 510;
     param.inputTextBuffer = (wchar_t *)input;
     param.title = (const wchar_t *)title;
-    param.horizontalAlignment = ORBIS_H_CENTER;
-    param.verticalAlignment = ORBIS_V_CENTER;
+    /*
+     * Keep the native IME inside the 1920x1080 framebuffer.  Centering with
+     * the default (0,0) anchor placed most of the panel outside the screen.
+     */
+    param.posx = 0.0f;
+    param.posy = 0.0f;
+    param.horizontalAlignment = ORBIS_H_LEFT;
+    param.verticalAlignment = ORBIS_V_TOP;
 
     int ret = sceImeDialogInit(&param, NULL);
     if (ret < 0)
@@ -502,7 +508,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = "http://example.com/";
+	feurl = "https://www.google.com/";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
