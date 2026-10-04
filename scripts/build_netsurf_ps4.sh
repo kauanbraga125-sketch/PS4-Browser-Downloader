@@ -1090,7 +1090,7 @@ input[type=submit] {
 <body>
 <main>
   <h1>PS4 Browser</h1>
-  <div class="subtitle">Pesquise e abra sites sem depender de JavaScript</div>
+  <div class="subtitle">Pesquise e abra sites com JavaScript quando suportado</div>
 
   <form action="https://html.duckduckgo.com/html/" method="post">
     <input type="text" name="q" placeholder="Pesquisar na web" autofocus>
@@ -1462,7 +1462,7 @@ PY
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
-override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_DUKTAPE := YES
 override NETSURF_USE_BMP := YES
 override NETSURF_USE_GIF := YES
 override NETSURF_USE_JPEG := YES
