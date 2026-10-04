@@ -156,55 +156,6 @@ s = s.replace(
     "    void __name##_register_surface(void) {                              \\\n",
     "    void __name##_register_surface(void) {                              \\\n"
 )
-# When an HTML editable control places a caret, open the native PS4 IME.
-caret_old = """static void
-gui_window_place_caret(struct gui_window *g, int x, int y, int height,
-		const struct rect *clip)
-{
-	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
-
-	/* set new pos */
-	fbtk_set_caret(g->browser, true, x, y, height,
-			gui_window_remove_caret_cb);
-
-	/* redraw new caret pos */
-	fb_queue_redraw(g->browser,
-			x - bwidget->scrollx,
-			y - bwidget->scrolly,
-			x + 1 - bwidget->scrollx,
-			y + height - bwidget->scrolly);
-}"""
-
-caret_new = """static void
-gui_window_place_caret(struct gui_window *g, int x, int y, int height,
-		const struct rect *clip)
-{
-	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
-
-	/* set new pos */
-	fbtk_set_caret(g->browser, true, x, y, height,
-			gui_window_remove_caret_cb);
-
-	/* redraw new caret pos */
-	fb_queue_redraw(g->browser,
-			x - bwidget->scrollx,
-			y - bwidget->scrolly,
-			x + 1 - bwidget->scrollx,
-			y + height - bwidget->scrolly);
-
-#ifdef ORBIS
-	if (!ps4_form_ime_active) {
-		ps4_form_ime_active = true;
-		(void)ps4_open_form_keyboard(g);
-		ps4_form_ime_active = false;
-	}
-#endif
-}"""
-
-if caret_old not in s:
-    raise SystemExit("framebuffer caret implementation changed")
-s = s.replace(caret_old, caret_new)
-
 p.write_text(s)
 PY
 cat > "$SRC/libnsfb/src/surface/Makefile" <<'EOF'
@@ -899,6 +850,55 @@ replacement = """\tcase NSFB_EVENT_KEY_DOWN:
 \t\tcase NSFB_KEY_DELETE:"""
 if "case NSFB_KEY_ESCAPE:" not in s[s.find("fb_browser_window_input"):s.find("fb_update_back_forward")]:
     s = s.replace(needle, replacement)
+
+# When an HTML editable control places a caret, open the native PS4 IME.
+caret_old = """static void
+gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+		const struct rect *clip)
+{
+	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
+
+	/* set new pos */
+	fbtk_set_caret(g->browser, true, x, y, height,
+			gui_window_remove_caret_cb);
+
+	/* redraw new caret pos */
+	fb_queue_redraw(g->browser,
+			x - bwidget->scrollx,
+			y - bwidget->scrolly,
+			x + 1 - bwidget->scrollx,
+			y + height - bwidget->scrolly);
+}"""
+
+caret_new = """static void
+gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+		const struct rect *clip)
+{
+	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
+
+	/* set new pos */
+	fbtk_set_caret(g->browser, true, x, y, height,
+			gui_window_remove_caret_cb);
+
+	/* redraw new caret pos */
+	fb_queue_redraw(g->browser,
+			x - bwidget->scrollx,
+			y - bwidget->scrolly,
+			x + 1 - bwidget->scrollx,
+			y + height - bwidget->scrolly);
+
+#ifdef ORBIS
+	if (!ps4_form_ime_active) {
+		ps4_form_ime_active = true;
+		(void)ps4_open_form_keyboard(g);
+		ps4_form_ime_active = false;
+	}
+#endif
+}"""
+
+if caret_old not in s:
+    raise SystemExit("framebuffer caret implementation changed")
+s = s.replace(caret_old, caret_new)
 
 p.write_text(s)
 PY
