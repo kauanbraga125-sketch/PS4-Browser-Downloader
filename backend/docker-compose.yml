@@ -1,0 +1,7 @@
+services:
+  ps4-browser-backend:
+    build: .
+    ports:
+      - "32124:32124/tcp"
+      - "32123:32123/udp"
+    restart: unless-stopped

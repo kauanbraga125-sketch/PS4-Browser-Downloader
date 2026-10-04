@@ -1,0 +1,35 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>PS4 Hybrid Browser</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{margin:0;background:#111;color:#eee;font-family:Arial,sans-serif}
+#bar{position:sticky;top:0;z-index:10;background:#1d1d1d;padding:8px;display:flex;gap:6px;flex-wrap:wrap}
+button,input{font-size:20px;padding:9px;border-radius:6px;border:1px solid #555}
+button{background:#333;color:#fff} #url{flex:1;min-width:500px} #typeText{min-width:300px}
+#status,#download{width:100%;font-size:17px;min-height:22px} #status{color:#b9d7ff}
+#download a{color:#90ee90;font-weight:bold} #screenWrap{background:#000;text-align:center}
+#screen{display:block;width:100%;height:auto;max-width:1280px;margin:0 auto;cursor:pointer}.active{background:#0b6!important}
+</style></head><body>
+<div id="bar">
+<button onclick="api('/api/back')">←</button><button onclick="api('/api/forward')">→</button>
+<button onclick="api('/api/reload')">⟳</button>
+<form onsubmit="go();return false;" style="display:flex;gap:6px;flex:1">
+<input id="url" autocomplete="off" placeholder="URL ou pesquisa"><button type="submit">Ir</button></form>
+<button onclick="scrollPage(-550)">↑</button><button onclick="scrollPage(550)">↓</button>
+<button id="imgMode" onclick="toggleImageMode()">Baixar imagem</button>
+<input id="typeText" autocomplete="off" placeholder="Texto para campo focado"><button onclick="sendText()">Enviar texto</button>
+<div id="status"></div><div id="download"></div></div>
+<div id="screenWrap"><img id="screen" src="/shot"></div>
+<script>
+var imageMode=false,shot=document.getElementById('screen');
+function xhr(m,u,b,d){var x=new XMLHttpRequest();x.open(m,u,true);if(b!==null)x.setRequestHeader('Content-Type','application/json');x.onreadystatechange=function(){if(x.readyState===4&&d)d(x)};x.send(b===null?null:JSON.stringify(b))}
+function refresh(){shot.src='/shot?t='+(new Date().getTime())}
+function api(u){xhr('POST',u,{},function(){setTimeout(refresh,400);poll()})}
+function go(){xhr('POST','/api/nav',{url:document.getElementById('url').value},function(){setTimeout(refresh,700);poll()})}
+function scrollPage(y){xhr('POST','/api/scroll',{y:y},function(){setTimeout(refresh,250)})}
+function sendText(){var e=document.getElementById('typeText');xhr('POST','/api/type',{text:e.value},function(){e.value='';setTimeout(refresh,250)})}
+function toggleImageMode(){imageMode=!imageMode;document.getElementById('imgMode').className=imageMode?'active':''}
+shot.onclick=function(e){var r=shot.getBoundingClientRect(),x=(e.clientX-r.left)*1280/r.width,y=(e.clientY-r.top)*720/r.height,ep=imageMode?'/api/image-at':'/api/click';xhr('POST',ep,{x:x,y:y},function(){if(imageMode){imageMode=false;document.getElementById('imgMode').className=''}setTimeout(refresh,300);poll()})};
+function poll(){xhr('GET','/api/state',null,function(x){if(x.status!==200)return;var s=JSON.parse(x.responseText);document.getElementById('status').textContent=(s.title||'')+' | '+(s.url||'')+' | '+(s.message||'');if(document.activeElement!==document.getElementById('url'))document.getElementById('url').value=s.url||'';document.getElementById('download').innerHTML=s.download?('Arquivo: '+s.download.filename+' — <a href="'+s.download.handoff+'">BAIXAR NO PS4</a>'):''})}
+setInterval(refresh,1200);setInterval(poll,1000);poll();
+</script></body></html>
