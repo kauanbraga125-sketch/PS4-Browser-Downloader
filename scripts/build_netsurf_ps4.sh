@@ -828,6 +828,7 @@ cat > content/handlers/image/ps4_stb.c <<'EOF'
 #include <string.h>
 
 #include "utils/log.h"
+#include "utils/utils.h"
 #include "netsurf/bitmap.h"
 #include "content/llcache.h"
 #include "content/content_protected.h"
@@ -1017,6 +1018,23 @@ if "ps4_stb.c" not in s:
     s = s.replace(
         "S_IMAGE_YES := image.c image_cache.c",
         "S_IMAGE_YES := image.c image_cache.c ps4_stb.c"
+    )
+p.write_text(s)
+
+p = Path("content/handlers/image/image.c")
+s = p.read_text()
+if "ps4stb_init" not in s:
+    s = s.replace(
+        '#include "image/image.h"',
+        '#include "image/image.h"\n#ifdef ORBIS\nnserror ps4stb_init(void);\n#endif'
+    )
+    s = s.replace(
+        'nserror error = NSERROR_OK;',
+        'nserror error = NSERROR_OK;\n\n#ifdef ORBIS\n'
+        '\terror = ps4stb_init();\n'
+        '\tif (error != NSERROR_OK)\n'
+        '\t\treturn error;\n'
+        '#endif'
     )
 p.write_text(s)
 PY
