@@ -39,10 +39,11 @@
 #include "content/fetch.h"
 #include "content/fetchers.h"
 
-#define PS4_NET_POOL_SIZE   (128 * 1024)
-#define PS4_HTTP_POOL_SIZE  (1024 * 1024)
-#define PS4_SSL_POOL_SIZE   (1024 * 1024)
+#define PS4_NET_POOL_SIZE   (256 * 1024)
+#define PS4_HTTP_POOL_SIZE  (2 * 1024 * 1024)
+#define PS4_SSL_POOL_SIZE   (2 * 1024 * 1024)
 #define PS4_READ_CHUNK      (64 * 1024)
+#define PS4_MAX_RESPONSE    (16 * 1024 * 1024)
 #define PS4_HTTP_TIMEOUT_US  (10 * 1000 * 1000)
 #define PS4_USER_AGENT      "Mozilla/5.0 (PlayStation 4; NetSurf PS4) NetSurf/PS4"
 
@@ -528,6 +529,10 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
             length_known = 0;
             expected_len = 0;
         }
+        if (length_known != 0 && expected_len > PS4_MAX_RESPONSE) {
+            ps4_send_error(ctx, "PS4: response too large for stable browser mode");
+            goto done;
+        }
     }
 
     {
@@ -592,6 +597,10 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         }
 
         received_len += (size_t)ret;
+        if (received_len > PS4_MAX_RESPONSE) {
+            ps4_send_error(ctx, "PS4: streamed response exceeded stable memory limit");
+            goto done;
+        }
         if (length_known != 0 && expected_len > 0 &&
             received_len >= expected_len) {
             break;
@@ -614,27 +623,32 @@ done:
 static void ps4_poll(lwc_string *scheme)
 {
     struct ps4_http_ctx *ctx;
-    struct ps4_http_ctx *saved = NULL;
 
     (void)scheme;
 
-    while (ps4_ring != NULL) {
-        ctx = ps4_ring;
-        RING_REMOVE(ps4_ring, ctx);
+    /*
+     * Process at most one network job per NetSurf poll.  v2.x drained the
+     * entire queue synchronously, so image-heavy/modern pages could hold the
+     * UI inside sceHttp for many requests in a row.  Returning to the browser
+     * loop between jobs keeps controller input and redraws responsive and
+     * greatly reduces long apparent freezes on real hardware.
+     */
+    if (ps4_ring == NULL)
+        return;
 
-        if (ctx->locked) {
-            RING_INSERT(saved, ctx);
-            continue;
-        }
+    ctx = ps4_ring;
+    RING_REMOVE(ps4_ring, ctx);
 
-        if (!ctx->aborted)
-            ps4_process_one(ctx);
-
-        fetch_remove_from_queues(ctx->parent);
-        fetch_free(ctx->parent);
+    if (ctx->locked) {
+        RING_INSERT(ps4_ring, ctx);
+        return;
     }
 
-    ps4_ring = saved;
+    if (!ctx->aborted)
+        ps4_process_one(ctx);
+
+    fetch_remove_from_queues(ctx->parent);
+    fetch_free(ctx->parent);
 }
 
 static int ps4_fdset(lwc_string *scheme,
