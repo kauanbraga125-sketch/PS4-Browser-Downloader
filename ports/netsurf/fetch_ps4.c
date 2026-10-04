@@ -83,10 +83,16 @@ static bool ps4_transport_init(void)
     (void)sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_SSL);
     (void)sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_HTTP);
 
+    /*
+     * The already-working browser downloader intentionally does not treat
+     * sceNetInit()'s return as fatal; on a running PS4 networking may already
+     * be initialised by the process/system environment.
+     */
     ret = sceNetInit();
     if (ret < 0) {
-        NSLOG(fetch, ERROR, "sceNetInit failed: 0x%08x", (unsigned)ret);
-        return false;
+        NSLOG(fetch, WARNING,
+              "sceNetInit returned 0x%08x; continuing to pool creation",
+              (unsigned)ret);
     }
 
     g_net_pool = sceNetPoolCreate("netsurf-ps4", PS4_NET_POOL_SIZE, 0);
@@ -129,10 +135,13 @@ static void ps4_transport_fini(void)
 
 static bool ps4_initialise(lwc_string *scheme)
 {
+    /*
+     * Registration must not touch PS4 network/sysmodule state.  NetSurf calls
+     * this while netsurf_init() is still starting, before the browser window
+     * exists.  Initialise the transport lazily on the first actual request.
+     */
     (void)scheme;
-    if (g_http >= 0)
-        return true;
-    return ps4_transport_init();
+    return true;
 }
 
 static bool ps4_acceptable(const nsurl *url)
@@ -277,6 +286,11 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     int status = 0;
     const char *url = nsurl_access(ctx->url);
     uint8_t *buf = NULL;
+
+    if (g_http < 0 && !ps4_transport_init()) {
+        ps4_send_error(ctx, "PS4: native HTTP transport init failed");
+        goto done;
+    }
 
     tpl = sceHttpCreateTemplate(g_http, PS4_USER_AGENT,
                                 ORBIS_HTTP_VERSION_1_1, 1);
