@@ -1,8 +1,8 @@
-name: Build PS4 WebKit Browser v5.1.2 Stable Navigation
+name: Build PS4 WebKit2 Browser v6.0 Native
 
 on:
   push:
-    branches: [ webkit-v5-1-2-stable-navigation ]
+    branches: [ webkit2-v6-native ]
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,35 +37,6 @@ jobs:
           test -n "$LINK_X"
           echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
 
-      - name: Fetch ezRemote v2.06 daemon donor
-        run: |
-          set -euxo pipefail
-          curl -fL --retry 5 --retry-all-errors \
-            https://github.com/cy33hc/ps4-ezremote-client/releases/download/2.06/ezremote_client.pkg \
-            -o ezremote_client.pkg
-          echo 'e09a84d193fdefd4e23378b089a0bbe76a51042bf2bd6f8d417716d6262f42f8  ezremote_client.pkg' | sha256sum -c -
-
-      - name: Extract background daemon
-        run: |
-          set -euxo pipefail
-          rm -rf ezremote_extract daemon
-          mkdir -p ezremote_extract
-          docker run --rm --user 0:0 \
-            --volume "$GITHUB_WORKSPACE:/work" \
-            --volume "$OO_PS4_TOOLCHAIN:/opt/openorbis" \
-            --workdir /work ubuntu:20.04 bash -lc '
-              export DEBIAN_FRONTEND=noninteractive
-              apt-get update -qq
-              apt-get install -y --no-install-recommends libicu66 libssl1.1 ca-certificates
-              /opt/openorbis/bin/linux/PkgTool.Core pkg_extract --verbose /work/ezremote_client.pkg /work/ezremote_extract
-            '
-          DAEMON_SRC=$(find ezremote_extract -type f -name daemon.elf -print -quit)
-          test -n "$DAEMON_SRC"
-          cp "$DAEMON_SRC" daemon.elf
-          test -s daemon.elf
-          sha256sum daemon.elf
-          sudo rm -rf ezremote_extract ezremote_client.pkg
-
       - name: Compile eboot
         run: |
           set -euxo pipefail
@@ -76,9 +47,6 @@ jobs:
       - name: Package PKG
         run: |
           set -euxo pipefail
-          chmod -R a+rwX build sce_sys sce_module 2>/dev/null || true
-          chmod a+rw daemon.elf 2>/dev/null || true
-          chmod a+rw eboot.bin Makefile 2>/dev/null || true
           docker run --rm --user 0:0 \
             --env OO_PS4_TOOLCHAIN=/opt/openorbis \
             --volume "$GITHUB_WORKSPACE:/work" \
@@ -89,15 +57,15 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v5_1_2_StableNavigation.pkg
-          sha256sum PS4_Browser_WebKit_v5_1_2_StableNavigation.pkg > PS4_Browser_WebKit_v5_1_2_StableNavigation.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit2_v6_0_Native.pkg
+          sha256sum PS4_Browser_WebKit2_v6_0_Native.pkg > PS4_Browser_WebKit2_v6_0_Native.pkg.sha256
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-WebKit-v5-1-2-StableNavigation
+          name: PS4-Browser-WebKit2-v6-0-Native
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Browser_WebKit_v5_1_2_StableNavigation.pkg
-            PS4_Browser_WebKit_v5_1_2_StableNavigation.pkg.sha256
+            PS4_Browser_WebKit2_v6_0_Native.pkg
+            PS4_Browser_WebKit2_v6_0_Native.pkg.sha256
