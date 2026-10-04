@@ -332,6 +332,7 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     (void)sceHttpSetResolveTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
     (void)sceHttpSetConnectTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
     (void)sceHttpSetSendTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
+    sceHttpSetRecvTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
 
     /*
      * IMPORTANT: deliberately no sceHttpsSetSslCallback() and no
@@ -339,7 +340,7 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
      * remains authoritative for HTTPS.
      */
 
-    conn = sceHttpCreateConnectionWithURL(tpl, url, true);
+    conn = sceHttpCreateConnectionWithURL(tpl, url, false);
     if (conn < 0) {
         NSLOG(fetch, ERROR, "sceHttpCreateConnectionWithURL: 0x%08x",
               (unsigned)conn);
@@ -360,6 +361,14 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         goto done;
     }
 
+    /*
+     * Keep the first stable browser milestone simple: no compressed body and
+     * no persistent connection. NetSurf receives ordinary HTML bytes and the
+     * PS4 HTTP layer has an unambiguous end-of-response.
+     */
+    (void)sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
+    (void)sceHttpAddRequestHeader(req, "Connection", "close", 1);
+
     ret = sceHttpSendRequest(req, NULL, 0);
     if (ret < 0) {
         int last_errno = 0;
@@ -377,6 +386,17 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         goto done;
     }
     fetch_set_http_code(ctx->parent, status);
+
+    size_t expected_len = 0;
+    size_t received_len = 0;
+    int length_known = 0;
+    {
+        int len_ret = sceHttpGetResponseContentLength(req, &length_known, &expected_len);
+        if (len_ret < 0) {
+            length_known = 0;
+            expected_len = 0;
+        }
+    }
 
     {
         char *all = NULL;
@@ -415,6 +435,12 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
             msg.data.header_or_data.buf = buf;
             msg.data.header_or_data.len = (size_t)ret;
             ps4_send(ctx, &msg);
+        }
+
+        received_len += (size_t)ret;
+        if (length_known != 0 && expected_len > 0 &&
+            received_len >= expected_len) {
+            break;
         }
     }
 
