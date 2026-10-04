@@ -39,6 +39,7 @@ fetch_repo netsurf-browser/libdom f69781e1f062444b5af3f62d431d7d94018da53b libdo
 fetch_repo netsurf-browser/libnsutils 0bd39060740b6163bd50875326654a722df97eb2 libnsutils
 fetch_repo netsurf-browser/libnsbmp ea063c9f46acb43e90208da14073332b505ef7e7 libnsbmp
 fetch_repo netsurf-browser/libnsgif 22e99eb6818b1284d0f3ff1b7f46159e87221220 libnsgif
+fetch_repo netsurf-browser/libsvgtiny 073283b29dd800e4d938db42af7e131db848bf3b libsvgtiny
 fetch_repo netsurf-browser/libnsfb b701cdce7241c3747ccd78658a365db0983ebe24 libnsfb
 fetch_repo madler/zlib refs/tags/v1.3.1 zlib
 fetch_repo pnggroup/libpng f5e92d76973a7a53f517579bc95d61483bf108c0 libpng
@@ -224,6 +225,7 @@ build_lib libdom
 build_lib libnsutils
 build_lib libnsbmp
 build_lib libnsgif
+build_lib libsvgtiny
 
 # Upstream libnsfb has an SDL 1.2 surface. Replace only that display surface
 # with the PS4 SDL2 implementation; keep the RAM surface for offscreen bitmaps.
@@ -1470,7 +1472,7 @@ override NETSURF_USE_JPEGXL := NO
 override NETSURF_USE_PNG := YES
 override NETSURF_USE_VIDEO := NO
 override NETSURF_USE_WEBP := NO
-override NETSURF_USE_NSSVG := NO
+override NETSURF_USE_NSSVG := YES
 override NETSURF_USE_NSPSL := NO
 override NETSURF_USE_NSLOG := NO
 override NETSURF_USE_UTF8PROC := NO
