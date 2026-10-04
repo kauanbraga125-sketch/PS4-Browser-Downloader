@@ -31,6 +31,8 @@
 #include <time.h>
 #include <sys/types.h>
 #include <cwchar>
+#include <cmath>
+#include <pthread.h>
 
 namespace {
 
@@ -273,7 +275,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.4", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1172,7 +1174,8 @@ static std::string discover_hybrid_backend() {
                     found = trim_copy(msg.substr(prefix.size()));
             }
 
-            if (!found.empty() && !backend_healthy(found) && backend_ui_healthy(found)) {
+            if (!found.empty() &&
+                !(backend_healthy(found) && backend_ui_healthy(found))) {
                 append_diag("HYBRID_HEALTH_FAIL", found);
                 found.clear();
             }
@@ -1322,7 +1325,7 @@ static bool http_get_bytes_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.4", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1409,7 +1412,7 @@ static bool http_post_json_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.4", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1510,51 +1513,230 @@ static bool open_url_ime(std::string& value) {
     return accepted && !value.empty();
 }
 
-static bool fetch_and_scale_frame(const std::string& backend,
-                                  SDL_Surface* scaledSurface) {
-    static uint64_t counter = 0;
-    std::vector<uint8_t> png;
-    const std::string url = backend + "/shot?t=" + std::to_string(++counter);
-    if (!http_get_bytes_native(url, png)) return false;
 
-    int w = 0, h = 0, channels = 0;
-    stbi_uc* pixels = stbi_load_from_memory(
-        png.data(), static_cast<int>(png.size()), &w, &h, &channels, 4);
-    if (!pixels || w <= 0 || h <= 0) {
-        if (pixels) stbi_image_free(pixels);
+struct FrameWorker {
+    std::string backend;
+    pthread_t thread{};
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    volatile bool stop = false;
+    std::vector<uint8_t> rgba;
+    int width = 0;
+    int height = 0;
+    uint64_t generation = 0;
+    bool everLoaded = false;
+};
+
+static bool parse_http_backend(const std::string& backend,
+                               std::string& host,
+                               int& port) {
+    const std::string prefix = "http://";
+    if (backend.compare(0, prefix.size(), prefix) != 0) return false;
+    std::string rest = backend.substr(prefix.size());
+    const size_t slash = rest.find('/');
+    if (slash != std::string::npos) rest.resize(slash);
+    const size_t colon = rest.rfind(':');
+    if (colon == std::string::npos) {
+        host = rest;
+        port = 80;
+    } else {
+        host = rest.substr(0, colon);
+        port = std::atoi(rest.substr(colon + 1).c_str());
+    }
+    return !host.empty() && port > 0 && port <= 65535;
+}
+
+static bool raw_http_get_local(const std::string& backend,
+                               const std::string& path,
+                               std::vector<uint8_t>& body) {
+    body.clear();
+    std::string host;
+    int port = 0;
+    if (!parse_http_backend(backend, host, port)) return false;
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(static_cast<uint16_t>(port));
+    sa.sin_addr.s_addr = inet_addr(host.c_str());
+    if (sa.sin_addr.s_addr == INADDR_NONE) {
+        close(fd);
         return false;
     }
 
-    SDL_Surface* src = SDL_CreateRGBSurfaceFrom(
-        pixels, w, h, 32, w * 4,
+    if (connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
+        close(fd);
+        return false;
+    }
+
+    const std::string req =
+        "GET " + path + " HTTP/1.1\r\n"
+        "Host: " + host + ":" + std::to_string(port) + "\r\n"
+        "Accept: image/png\r\n"
+        "Accept-Encoding: identity\r\n"
+        "Connection: close\r\n\r\n";
+
+    size_t sent = 0;
+    while (sent < req.size()) {
+        const ssize_t n = write(fd, req.data() + sent, req.size() - sent);
+        if (n <= 0) {
+            close(fd);
+            return false;
+        }
+        sent += static_cast<size_t>(n);
+    }
+
+    std::vector<uint8_t> response;
+    response.reserve(2 * 1024 * 1024);
+    uint8_t buf[32 * 1024];
+    for (;;) {
+        const ssize_t n = read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            close(fd);
+            return false;
+        }
+        if (n == 0) break;
+        response.insert(response.end(), buf, buf + n);
+        if (response.size() > 12 * 1024 * 1024) {
+            close(fd);
+            return false;
+        }
+    }
+    close(fd);
+
+    static const uint8_t sep[] = {'\r','\n','\r','\n'};
+    auto it = std::search(response.begin(), response.end(),
+                          sep, sep + sizeof(sep));
+    if (it == response.end()) return false;
+
+    const size_t headerLen =
+        static_cast<size_t>(it - response.begin()) + sizeof(sep);
+    std::string header(reinterpret_cast<const char*>(response.data()),
+                       headerLen);
+    if (header.find(" 200 ") == std::string::npos) return false;
+
+    body.assign(response.begin() + headerLen, response.end());
+    return !body.empty();
+}
+
+static void* frame_worker_main(void* arg) {
+    FrameWorker* worker = static_cast<FrameWorker*>(arg);
+    uint64_t counter = 0;
+
+    while (!worker->stop) {
+        std::vector<uint8_t> png;
+        const std::string path =
+            "/shot?t=" + std::to_string(++counter);
+
+        if (raw_http_get_local(worker->backend, path, png)) {
+            int w = 0, h = 0, channels = 0;
+            stbi_uc* pixels = stbi_load_from_memory(
+                png.data(), static_cast<int>(png.size()),
+                &w, &h, &channels, 4);
+
+            if (pixels && w > 0 && h > 0) {
+                const size_t size =
+                    static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
+                pthread_mutex_lock(&worker->mutex);
+                worker->rgba.assign(pixels, pixels + size);
+                worker->width = w;
+                worker->height = h;
+                worker->generation++;
+                worker->everLoaded = true;
+                pthread_mutex_unlock(&worker->mutex);
+            }
+            if (pixels) stbi_image_free(pixels);
+        }
+
+        // Network/PNG work stays on this thread. Input/render never waits here.
+        for (int i = 0; i < 20 && !worker->stop; ++i)
+            usleep(10 * 1000);
+    }
+    return nullptr;
+}
+
+static bool start_frame_worker(FrameWorker& worker,
+                               const std::string& backend) {
+    worker.backend = backend;
+    worker.stop = false;
+    return pthread_create(&worker.thread, nullptr,
+                          frame_worker_main, &worker) == 0;
+}
+
+static void stop_frame_worker(FrameWorker& worker) {
+    worker.stop = true;
+    pthread_join(worker.thread, nullptr);
+    pthread_mutex_destroy(&worker.mutex);
+}
+
+static bool consume_latest_frame(FrameWorker& worker,
+                                 uint64_t& seenGeneration,
+                                 SDL_Surface* scaledSurface) {
+    std::vector<uint8_t> copy;
+    int w = 0, h = 0;
+    uint64_t generation = 0;
+
+    pthread_mutex_lock(&worker.mutex);
+    generation = worker.generation;
+    if (generation != seenGeneration && !worker.rgba.empty()) {
+        copy = worker.rgba;
+        w = worker.width;
+        h = worker.height;
+    }
+    pthread_mutex_unlock(&worker.mutex);
+
+    if (copy.empty() || w <= 0 || h <= 0) return false;
+
+    SDL_Surface* source = SDL_CreateRGBSurfaceFrom(
+        copy.data(), w, h, 32, w * 4,
         0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
-    if (!src) {
-        stbi_image_free(pixels);
-        return false;
-    }
+    if (!source) return false;
 
     SDL_FillRect(scaledSurface, nullptr,
                  SDL_MapRGB(scaledSurface->format, 0, 0, 0));
     SDL_Rect dst{0, 0, SCREEN_W, SCREEN_H};
-    const int rc = SDL_BlitScaled(src, nullptr, scaledSurface, &dst);
+    const int rc = SDL_BlitScaled(source, nullptr, scaledSurface, &dst);
+    SDL_FreeSurface(source);
 
-    SDL_FreeSurface(src);
-    stbi_image_free(pixels);
-    return rc == 0;
+    if (rc == 0) {
+        seenGeneration = generation;
+        return true;
+    }
+    return false;
 }
 
 static void draw_cursor(SDL_Surface* surface, int x, int y) {
-    const Uint32 red = SDL_MapRGB(surface->format, 255, 40, 40);
-    SDL_Rect h{x - 14, y - 2, 29, 5};
-    SDL_Rect v{x - 2, y - 14, 5, 29};
-    SDL_FillRect(surface, &h, red);
-    SDL_FillRect(surface, &v, red);
+    const Uint32 outer = SDL_MapRGB(surface->format, 0, 0, 0);
+    const Uint32 inner = SDL_MapRGB(surface->format, 255, 255, 255);
+    const Uint32 center = SDL_MapRGB(surface->format, 255, 45, 45);
+
+    SDL_Rect ho{x - 17, y - 3, 35, 7};
+    SDL_Rect vo{x - 3, y - 17, 7, 35};
+    SDL_FillRect(surface, &ho, outer);
+    SDL_FillRect(surface, &vo, outer);
+
+    SDL_Rect hi{x - 15, y - 1, 31, 3};
+    SDL_Rect vi{x - 1, y - 15, 3, 31};
+    SDL_FillRect(surface, &hi, inner);
+    SDL_FillRect(surface, &vi, inner);
+
+    SDL_Rect dot{x - 2, y - 2, 5, 5};
+    SDL_FillRect(surface, &dot, center);
 }
 
 static bool backend_api(const std::string& backend,
                         const char* path,
                         const std::string& json = "{}") {
     return http_post_json_native(backend + path, json);
+}
+
+static bool backend_focus_is_editable(const std::string& backend) {
+    std::string text;
+    int32_t status = 0;
+    return http_get_text_native(
+               backend + "/api/focus-info", text, &status) &&
+           text == "1";
 }
 
 static bool process_pending_download(const std::string& backend) {
@@ -1598,29 +1780,25 @@ static bool process_pending_download(const std::string& backend) {
         }
     }
 
-    // A task is one-shot from the browser UI. Avoid an endless retry loop.
     (void)backend_api(backend, "/api/ack-download");
     return ok;
 }
 
-static int cursor_axis_step(uint8_t raw) {
-    const int centered = static_cast<int>(raw) - 128;
-    const int magnitude = std::abs(centered);
+static float cursor_axis_velocity(uint8_t raw) {
+    const float centered = static_cast<float>(
+        static_cast<int>(raw) - 128);
+    const float magnitude = std::fabs(centered);
+    const float deadzone = 11.0f;
 
-    // Small deadzone for quick response without cursor drift.
-    const int deadzone = 10;
-    if (magnitude <= deadzone) return 0;
+    if (magnitude <= deadzone) return 0.0f;
 
-    const int active = magnitude - deadzone; // 1..117
+    float t = (magnitude - deadzone) / (127.0f - deadzone);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
 
-    // Progressive curve:
-    // tiny tilt -> pixel-precise movement
-    // medium tilt -> clearly faster
-    // full tilt -> fast traversal across the 1920px screen
-    int step = 1 + active / 5 + (active * active) / 700;
-    if (step > 44) step = 44;
-
-    return centered < 0 ? -step : step;
+    // px/s. Fine near center, very fast at full tilt.
+    const float speed = 85.0f * t + 1750.0f * t * t;
+    return centered < 0.0f ? -speed : speed;
 }
 
 static int open_native_pad() {
@@ -1638,7 +1816,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.3.2 fast cursor");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.4 smooth input");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -1661,7 +1839,7 @@ int main() {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "PS4 Hybrid Browser v7.3",
+        "PS4 Hybrid Browser v7.4",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         SCREEN_W, SCREEN_H, 0);
     if (!window) {
@@ -1686,46 +1864,53 @@ int main() {
         clean_exit_to_shell();
     }
 
-    SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 18, 18, 18));
+    SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 35, 35, 35));
     SDL_BlitSurface(frame, nullptr, screen, nullptr);
     SDL_UpdateWindowSurface(window);
 
+    FrameWorker worker;
+    if (!start_frame_worker(worker, backend)) {
+        notify_user("Hybrid: falha iniciando thread de video");
+        sleep(4);
+        clean_exit_to_shell();
+    }
+
     const int pad = open_native_pad();
     if (pad < 0) {
+        worker.stop = true;
+        stop_frame_worker(worker);
         notify_user("Hybrid: controle PS4 nao abriu");
         sleep(4);
         clean_exit_to_shell();
     }
 
-    notify_user("Hybrid v7.3: X clicar | O voltar | R2 URL | triangulo baixar imagem | Options sair");
+    notify_user("Hybrid v7.4: X clicar/digitar | O voltar | R2 URL | D-pad scroll | Options sair");
 
-    int cursorX = SCREEN_W / 2;
-    int cursorY = SCREEN_H / 2;
+    float cursorXF = static_cast<float>(SCREEN_W) * 0.5f;
+    float cursorYF = static_cast<float>(SCREEN_H) * 0.5f;
     uint32_t oldButtons = 0;
-    uint64_t frameTick = 0;
-    uint64_t downloadTick = 0;
+    uint64_t seenGeneration = 0;
+    uint64_t downloadTick = static_cast<uint64_t>(SDL_GetTicks());
+    uint64_t lastTick = static_cast<uint64_t>(SDL_GetTicks());
     bool redraw = true;
-    bool frameEverLoaded = false;
 
     for (;;) {
         SDL_PumpEvents();
 
         const uint64_t now = static_cast<uint64_t>(SDL_GetTicks());
+        float dt = static_cast<float>(now - lastTick) / 1000.0f;
+        lastTick = now;
 
-        // Refresh Chromium screenshot roughly 3 times per second.
-        if (!frameEverLoaded || now - frameTick >= 330) {
-            if (fetch_and_scale_frame(backend, frame)) {
-                frameEverLoaded = true;
-                redraw = true;
-            } else if (!frameEverLoaded) {
-                SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 45, 45, 45));
-                redraw = true;
-            }
-            frameTick = now;
-        }
+        // Never turn a temporary stall into a cursor teleport.
+        if (dt < 0.0f) dt = 0.0f;
+        if (dt > 0.033f) dt = 0.033f;
 
-        // Poll browser-triggered downloads without involving WebBrowserDialog.
-        if (now - downloadTick >= 1000) {
+        if (consume_latest_frame(worker, seenGeneration, frame))
+            redraw = true;
+
+        // Pending download polling is infrequent. Normal cursor/video never
+        // waits for screenshot networking anymore.
+        if (now - downloadTick >= 1500) {
             (void)process_pending_download(backend);
             downloadTick = now;
         }
@@ -1735,54 +1920,63 @@ int main() {
             const uint32_t pressed = pd.buttons & ~oldButtons;
             oldButtons = pd.buttons;
 
-            const int moveX = cursor_axis_step(pd.leftStick.x);
-            const int moveY = cursor_axis_step(pd.leftStick.y);
-            if (moveX || moveY) {
-                cursorX += moveX;
-                cursorY += moveY;
-                cursorX = std::max(0, std::min(SCREEN_W - 1, cursorX));
-                cursorY = std::max(0, std::min(SCREEN_H - 1, cursorY));
+            const float vx = cursor_axis_velocity(pd.leftStick.x);
+            const float vy = cursor_axis_velocity(pd.leftStick.y);
+
+            if (vx != 0.0f || vy != 0.0f) {
+                cursorXF += vx * dt;
+                cursorYF += vy * dt;
+                if (cursorXF < 0.0f) cursorXF = 0.0f;
+                if (cursorYF < 0.0f) cursorYF = 0.0f;
+                if (cursorXF > SCREEN_W - 1) cursorXF = SCREEN_W - 1;
+                if (cursorYF > SCREEN_H - 1) cursorYF = SCREEN_H - 1;
                 redraw = true;
             }
 
+            const int cursorX = static_cast<int>(cursorXF + 0.5f);
+            const int cursorY = static_cast<int>(cursorYF + 0.5f);
+            const int bx = cursorX * 1280 / SCREEN_W;
+            const int by = cursorY * 720 / SCREEN_H;
+
             if (pressed & ORBIS_PAD_BUTTON_CROSS) {
-                const int bx = cursorX * 1280 / SCREEN_W;
-                const int by = cursorY * 720 / SCREEN_H;
-                backend_api(backend, "/api/click",
+                if (backend_api(backend, "/api/click",
                     "{\"x\":" + std::to_string(bx) +
-                    ",\"y\":" + std::to_string(by) + "}");
-                frameTick = 0;
+                    ",\"y\":" + std::to_string(by) + "}")) {
+                    // If X focused an input/search field, keyboard appears
+                    // automatically. Links/buttons simply click normally.
+                    usleep(60 * 1000);
+                    if (backend_focus_is_editable(backend)) {
+                        std::string text;
+                        if (open_url_ime(text)) {
+                            backend_api(backend, "/api/type-submit",
+                                "{\"text\":\"" + json_escape(text) + "\"}");
+                        }
+                    }
+                }
             }
 
             if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
                 (pressed & ORBIS_PAD_BUTTON_L1)) {
                 backend_api(backend, "/api/back");
-                frameTick = 0;
             }
 
             if (pressed & ORBIS_PAD_BUTTON_R1) {
                 backend_api(backend, "/api/forward");
-                frameTick = 0;
             }
 
             if (pressed & ORBIS_PAD_BUTTON_SQUARE) {
                 backend_api(backend, "/api/reload");
-                frameTick = 0;
             }
 
             if (pressed & ORBIS_PAD_BUTTON_UP) {
-                backend_api(backend, "/api/scroll", "{\"y\":-550}");
-                frameTick = 0;
+                backend_api(backend, "/api/scroll", "{\"y\":-500}");
             }
 
             if (pressed & ORBIS_PAD_BUTTON_DOWN) {
-                backend_api(backend, "/api/scroll", "{\"y\":550}");
-                frameTick = 0;
+                backend_api(backend, "/api/scroll", "{\"y\":500}");
             }
 
             if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) {
-                const int bx = cursorX * 1280 / SCREEN_W;
-                const int by = cursorY * 720 / SCREEN_H;
                 backend_api(backend, "/api/image-at",
                     "{\"x\":" + std::to_string(bx) +
                     ",\"y\":" + std::to_string(by) + "}");
@@ -1795,7 +1989,6 @@ int main() {
                 if (open_url_ime(text)) {
                     backend_api(backend, "/api/nav",
                         "{\"url\":\"" + json_escape(text) + "\"}");
-                    frameTick = 0;
                 }
             }
 
@@ -1804,26 +1997,26 @@ int main() {
                 if (open_url_ime(text)) {
                     backend_api(backend, "/api/type",
                         "{\"text\":\"" + json_escape(text) + "\"}");
-                    frameTick = 0;
                 }
             }
 
             if (pressed & ORBIS_PAD_BUTTON_OPTIONS) {
-                notify_user("Hybrid: fechando cliente. Downloads ja enviados continuam no sistema/daemon.");
+                notify_user("Hybrid: fechando cliente.");
                 break;
             }
-        }
 
-        if (redraw) {
-            SDL_BlitSurface(frame, nullptr, screen, nullptr);
-            draw_cursor(screen, cursorX, cursorY);
-            SDL_UpdateWindowSurface(window);
-            redraw = false;
+            if (redraw) {
+                SDL_BlitSurface(frame, nullptr, screen, nullptr);
+                draw_cursor(screen, cursorX, cursorY);
+                SDL_UpdateWindowSurface(window);
+                redraw = false;
+            }
         }
 
         usleep(16 * 1000);
     }
 
+    stop_frame_worker(worker);
     SDL_FreeSurface(frame);
     SDL_DestroyWindow(window);
     SDL_Quit();
