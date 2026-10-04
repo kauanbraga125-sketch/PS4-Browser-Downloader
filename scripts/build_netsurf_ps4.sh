@@ -430,6 +430,15 @@ NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmo
 env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$NETSURF_LDFLAGS" make -j2 TARGET=framebuffer "CC=$TOOLS/ps4-gcc" "CXX=$TOOLS/ps4-g++" "PKG_CONFIG=$TOOLS/ps4-pkg-config" Q= VQ=
 
 test -s nsfb
+
+# PS4 FSELF executables must not request the host FreeBSD runtime loader.
+# A PT_INTERP here makes the console fail before main() (CE-34878-0).
+if readelf -lW nsfb | grep -q 'INTERP'; then
+    echo "ERROR: PS4 NetSurf ELF unexpectedly contains PT_INTERP"
+    readelf -lW nsfb
+    exit 1
+fi
+
 mkdir -p "$ROOT/build/independent"
 cp nsfb "$ROOT/build/independent/netsurf-ps4.elf"
 mkdir -p "$ROOT/build/independent/res"
