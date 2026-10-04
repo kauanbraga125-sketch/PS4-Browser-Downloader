@@ -145,6 +145,18 @@ build_lib libnsutils
 # Upstream libnsfb has an SDL 1.2 surface. Replace only that display surface
 # with the PS4 SDL2 implementation; keep the RAM surface for offscreen bitmaps.
 cp "$ROOT/ports/libnsfb/ps4_sdl2.c" "$SRC/libnsfb/src/surface/ps4_sdl2.c"
+
+python3 - <<'PY'
+from pathlib import Path
+p = Path("$SRC/libnsfb/src/surface.h")
+s = p.read_text()
+s = s.replace(
+    "    static void __name##_register_surface(void) __attribute__((constructor)); \\\n"
+    "    void __name##_register_surface(void) {                              \\\n",
+    "    void __name##_register_surface(void) {                              \\\n"
+)
+p.write_text(s)
+PY
 cat > "$SRC/libnsfb/src/surface/Makefile" <<'EOF'
 DIR_SOURCES := surface.c ram.c ps4_sdl2.c
 include $(NSBUILD)/Makefile.subdir
@@ -201,6 +213,9 @@ if '#include <SDL2/SDL.h>' not in s:
 
 diag = r'''
 #ifdef ORBIS
+extern void ram_register_surface(void);
+extern void ps4_register_surface(void);
+
 static SDL_Window *ps4_diag_window;
 static SDL_Surface *ps4_diag_surface;
 static SDL_Joystick *ps4_diag_pad;
@@ -309,7 +324,10 @@ if 'ps4_diag_checkpoint(int stage)' not in s:
 s = s.replace(
     'main(int argc, char** argv)\n{\n\tstruct browser_window *bw;',
     'main(int argc, char** argv)\n{\n#ifdef ORBIS\n'
-    '\tif (!ps4_diag_checkpoint(1)) return 101;\n#endif\n'
+    '\tif (!ps4_diag_checkpoint(1)) return 101;\n'
+    '\tram_register_surface();\n'
+    '\tps4_register_surface();\n'
+    '#endif\n'
     '\tstruct browser_window *bw;'
 )
 
