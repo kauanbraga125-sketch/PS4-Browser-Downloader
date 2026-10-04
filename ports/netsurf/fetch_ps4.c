@@ -50,6 +50,7 @@ struct ps4_http_ctx {
     struct fetch *parent;
     nsurl *url;
     char **headers;
+    char *post_urlenc;
     bool aborted;
     bool locked;
     struct ps4_http_ctx *r_next;
@@ -185,10 +186,14 @@ static void *ps4_setup(struct fetch *parent_fetch,
 
     (void)only_2xx;
     (void)downgrade_tls;
-    (void)post_multipart;
 
-    /* First milestone is GET navigation. Do not silently turn a POST into GET. */
-    if (post_urlenc != NULL)
+    /*
+     * NetSurf passes ordinary HTML form submissions as an already encoded
+     * application/x-www-form-urlencoded body.  The old PS4 proof rejected
+     * these here, which made any POST form fail before sceHttp was reached.
+     * Multipart uploads remain a later milestone; reject only those.
+     */
+    if (post_multipart != NULL)
         return NULL;
 
     ctx = calloc(1, sizeof(*ctx));
@@ -198,11 +203,21 @@ static void *ps4_setup(struct fetch *parent_fetch,
     ctx->parent = parent_fetch;
     ctx->url = nsurl_ref(url);
 
+    if (post_urlenc != NULL) {
+        ctx->post_urlenc = strdup(post_urlenc);
+        if (ctx->post_urlenc == NULL) {
+            nsurl_unref(ctx->url);
+            free(ctx);
+            return NULL;
+        }
+    }
+
     if (headers != NULL) {
         size_t n = 0;
         while (headers[n] != NULL) n++;
         ctx->headers = calloc(n + 1, sizeof(char *));
         if (ctx->headers == NULL) {
+            free(ctx->post_urlenc);
             nsurl_unref(ctx->url);
             free(ctx);
             return NULL;
@@ -212,6 +227,7 @@ static void *ps4_setup(struct fetch *parent_fetch,
             if (ctx->headers[i] == NULL) {
                 while (i > 0) free(ctx->headers[--i]);
                 free(ctx->headers);
+                free(ctx->post_urlenc);
                 nsurl_unref(ctx->url);
                 free(ctx);
                 return NULL;
@@ -243,6 +259,7 @@ static void ps4_free(void *vctx)
             free(ctx->headers[i]);
         free(ctx->headers);
     }
+    free(ctx->post_urlenc);
     nsurl_unref(ctx->url);
     free(ctx);
 }
@@ -399,6 +416,8 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     int ret;
     int status = 0;
     const char *url = nsurl_access(ctx->url);
+    const bool is_post = (ctx->post_urlenc != NULL);
+    const size_t post_len = is_post ? strlen(ctx->post_urlenc) : 0;
     uint8_t *buf = NULL;
 
     if (g_http < 0 && !ps4_transport_init()) {
@@ -440,7 +459,11 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         goto done;
     }
 
-    req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url, 0);
+    req = sceHttpCreateRequestWithURL(
+        conn,
+        is_post ? ORBIS_METHOD_POST : ORBIS_METHOD_GET,
+        url,
+        is_post ? (uint64_t)post_len : 0);
     if (req < 0) {
         NSLOG(fetch, ERROR, "sceHttpCreateRequestWithURL: 0x%08x",
               (unsigned)req);
@@ -461,7 +484,24 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     (void)sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
     (void)sceHttpAddRequestHeader(req, "Connection", "close", 1);
 
-    ret = sceHttpSendRequest(req, NULL, 0);
+    if (is_post) {
+        /*
+         * HTML forms supplied through post_urlenc are exactly this media type.
+         * Passing the length both when creating and sending the request keeps
+         * libSceHttp from guessing/chunking the body.
+         */
+        (void)sceHttpAddRequestHeader(
+            req,
+            "Content-Type",
+            "application/x-www-form-urlencoded",
+            1);
+        (void)sceHttpSetRequestContentLength(req, (uint64_t)post_len);
+    }
+
+    ret = sceHttpSendRequest(
+        req,
+        is_post ? (const void *)ctx->post_urlenc : NULL,
+        is_post ? post_len : 0);
     if (ret < 0) {
         int last_errno = 0;
         (void)sceHttpGetLastErrno(req, &last_errno);
