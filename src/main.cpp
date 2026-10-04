@@ -104,6 +104,7 @@ using BrowserInitializeFn = int32_t (*)();
 using BrowserTerminateFn = int32_t (*)();
 using BrowserOpenFn = int32_t (*)(const BrowserParam*);
 using BrowserUpdateStatusFn = int32_t (*)();
+using BrowserGetStatusFn = int32_t (*)();
 using BrowserGetResultFn = int32_t (*)(BrowserResult*);
 using BrowserCloseFn = int32_t (*)();
 
@@ -113,6 +114,7 @@ struct BrowserApi {
     BrowserTerminateFn terminate = nullptr;
     BrowserOpenFn open = nullptr;
     BrowserUpdateStatusFn updateStatus = nullptr;
+    BrowserGetStatusFn getStatus = nullptr;
     BrowserGetResultFn getResult = nullptr;
     BrowserCloseFn close = nullptr;
 };
@@ -200,6 +202,7 @@ static bool init_browser() {
         !dlsym_required(g_browser.module, "sceWebBrowserDialogTerminate", (void**)&g_browser.terminate) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogOpen", (void**)&g_browser.open) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogUpdateStatus", (void**)&g_browser.updateStatus) ||
+        !dlsym_required(g_browser.module, "sceWebBrowserDialogGetStatus", (void**)&g_browser.getStatus) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogGetResult", (void**)&g_browser.getResult) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogClose", (void**)&g_browser.close)) return false;
 
@@ -385,15 +388,6 @@ static bool open_browser_and_wait() {
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
 
-    /*
-     * Use the PS4's real WebKit/browser service.  This is intentionally NOT
-     * NetSurf: modern JavaScript, cookies and the DOM are handled by the
-     * console's WebKit stack.  Default mode is tried first because it gives
-     * the browser the least restrictive system presentation (new-window,
-     * media and site UI behaviour are less constrained than our old custom
-     * rectangle).  Custom mode is only a fallback for firmwares where default
-     * presentation is unavailable to homebrew.
-     */
     static const char* startUrl = "https://www.google.com/?hl=pt-BR";
     static const char* callbackRegex = "https?://.*\\.pkg([?#].*)?$";
 
@@ -402,60 +396,90 @@ static bool open_browser_and_wait() {
     cb.type = CALLBACK_TYPE_REGEXP;
     cb.data = callbackRegex;
 
+    BrowserImeParam ime{};
+    ime.size = sizeof(ime);
+    ime.option = 0;
+
+    BrowserWebViewParam webview{};
+    webview.size = sizeof(webview);
+    webview.option = 0;
+
+    /*
+     * Use CUSTOM mode directly. This keeps the same PS4 WebKit engine that
+     * already rendered Google and YouTube correctly in v4.1, but exposes the
+     * browser header/address bar plus the native Back/Forward/Reload controls.
+     *
+     * Sony's sample uses:
+     *   parts   = TITLE | ADDRESS
+     *   control = EXIT | RELOAD | BACK | FORWARD | ZOOM | OPTION_MENU
+     * Values are bit flags; 0x3 and 0x7F cover that family on this ABI.
+     */
     BrowserParam p{};
     p.baseParam.size = sizeof(CommonDialogBaseParam);
     p.baseParam.magic = DIALOG_MAGIC + static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&p.baseParam));
     p.size = sizeof(p);
-    p.mode = BROWSER_MODE_DEFAULT;
+    p.mode = BROWSER_MODE_CUSTOM;
     p.userId = user;
     p.url = startUrl;
     p.callbackInitParam = &cb;
+    p.width = 1920;
+    p.height = 963;
+    p.positionX = 0;
+    p.positionY = 117;
+    p.parts = 0x3;
+    p.headerWidth = 1920;
+    p.headerPositionX = 0;
+    p.headerPositionY = 0;
+    p.control = 0x7F;
+    p.imeParam = &ime;
+    p.webviewParam = &webview;
+    p.animation = 0;
 
-    g_status = "Abrindo WebKit do PS4 (modo completo)...";
+    g_status = "Abrindo WebKit PS4 com barra de endereco...";
     int32_t r = g_browser.open(&p);
-
-    if (r != 0) {
-        /*
-         * Fallback to the old custom rectangle, but expose the complete
-         * navigation control family.  We do not reset cookies between the two
-         * attempts, so challenge/session cookies remain in the browser store.
-         */
-        BrowserImeParam ime{};
-        ime.size = sizeof(ime);
-        ime.option = 0;
-
-        BrowserWebViewParam webview{};
-        webview.size = sizeof(webview);
-        webview.option = 0;
-
-        p.mode = BROWSER_MODE_CUSTOM;
-        p.width = 1920;
-        p.height = 963;
-        p.positionX = 0;
-        p.positionY = 117;
-        p.parts = 0x3;      // title + address
-        p.headerWidth = 1920;
-        p.control = 0x7F;   // exit/reload/back/forward/zoom/options family
-        p.imeParam = &ime;
-        p.webviewParam = &webview;
-        p.animation = 0;
-
-        g_status = "Modo completo indisponivel; tentando WebKit custom...";
-        r = g_browser.open(&p);
-    }
-
     if (r != 0) {
         g_status = "Browser WebKit open: " + hex32(r);
         return false;
     }
 
-    g_status = "WebKit aberto: JavaScript/cookies do sistema ativos. Links .pkg vao para BGFT.";
+    bool finished = false;
+    int32_t terminalStatus = DIALOG_STATUS_RUNNING;
 
+    /*
+     * Correct lifecycle:
+     * - GetStatus only observes.
+     * - UpdateStatus advances one frame.
+     * - GetResult is legal only after FINISHED.
+     * - Do NOT call Close after a naturally-finished dialog.
+     *
+     * v4.1 called GetResult/Close even after other terminal states; on real
+     * hardware that was a plausible source of CE-34878-0 when using Back/Exit.
+     */
     for (;;) {
-        const int32_t st = g_browser.updateStatus();
-        if (st == DIALOG_STATUS_FINISHED || st == DIALOG_STATUS_NONE || st < 0)
+        const int32_t observed = g_browser.getStatus ? g_browser.getStatus() : DIALOG_STATUS_RUNNING;
+        if (observed == DIALOG_STATUS_FINISHED) {
+            finished = true;
+            terminalStatus = observed;
             break;
+        }
+
+        const int32_t st = g_browser.updateStatus();
+        terminalStatus = st;
+        if (st == DIALOG_STATUS_FINISHED) {
+            finished = true;
+            break;
+        }
+        if (st < 0) {
+            g_status = "Browser update status: " + hex32(st);
+            return false;
+        }
+
         usleep(16 * 1000);
+    }
+
+    if (!finished) {
+        g_status = "Browser terminou em estado inesperado: " + hex32(terminalStatus);
+        return false;
     }
 
     BrowserCallbackResultParam cbout{};
@@ -464,20 +488,25 @@ static bool open_browser_and_wait() {
     result.callbackResultParam = &cbout;
 
     r = g_browser.getResult(&result);
+    if (r != 0) {
+        g_status = "Browser get result: " + hex32(r);
+        return false;
+    }
+
     std::string captured;
-    if (r == 0 && result.result == DIALOG_RESULT_CALLBACK && cbout.data)
+    if (result.result == DIALOG_RESULT_CALLBACK && cbout.data)
         captured = cbout.data;
     if (captured.empty() && cbout.buffer && cbout.bufferSize)
         captured.assign(cbout.buffer, cbout.bufferSize);
 
-    g_browser.close();
+    // Important: no sceWebBrowserDialogClose() here. FINISHED already owns teardown.
 
     if (!captured.empty() && looks_like_pkg(captured)) {
         g_status = "Link PKG capturado. Preparando download em segundo plano...";
         return queue_bgft(captured);
     }
 
-    g_status = "Navegador fechado";
+    g_status = "Navegador fechado normalmente";
     return true;
 }
 
@@ -491,7 +520,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     const bool ok = open_browser_and_wait();
 
-    // Always tear down in a fixed order; Circle/back is owned by WebBrowserDialog.
+    // Tear down only after the browser has naturally reached FINISHED.
     if (g_browser.terminate) g_browser.terminate();
     if (g_bgftInit) sceBgftServiceIntTerm();
     if (g_bgftHeap) std::free(g_bgftHeap);

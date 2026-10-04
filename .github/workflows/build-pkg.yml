@@ -1,4 +1,4 @@
-name: Build PS4 WebKit Browser v4.1 Direct
+name: Build PS4 WebKit Browser v4.2 Navigation
 
 on:
   push:
@@ -58,15 +58,15 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_1_Direct.pkg
-          sha256sum PS4_Browser_WebKit_v4_1_Direct.pkg > PS4_Browser_WebKit_v4_1_Direct.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_2_Navigation.pkg
+          sha256sum PS4_Browser_WebKit_v4_2_Navigation.pkg > PS4_Browser_WebKit_v4_2_Navigation.pkg.sha256
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-WebKit-v4-1-Direct
+          name: PS4-Browser-WebKit-v4-2-Navigation
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Browser_WebKit_v4_1_Direct.pkg
-            PS4_Browser_WebKit_v4_1_Direct.pkg.sha256
+            PS4_Browser_WebKit_v4_2_Navigation.pkg
+            PS4_Browser_WebKit_v4_2_Navigation.pkg.sha256
