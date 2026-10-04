@@ -810,6 +810,218 @@ small { font-size:24px; }
 EOF
 
 
+
+# PS4 image handler: use stb_image from OpenOrbis for the common web formats
+# without pulling libpng/libjpeg into the first visual milestone.
+cat > content/handlers/image/ps4_stb.c <<'EOF'
+#ifdef ORBIS
+
+#define STBI_NO_STDIO
+#define STBI_NO_HDR
+#define STBI_NO_LINEAR
+#define STBI_NO_THREAD_LOCALS
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb/stb_image.h>
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "utils/log.h"
+#include "netsurf/bitmap.h"
+#include "content/llcache.h"
+#include "content/content_protected.h"
+#include "content/content_factory.h"
+#include "desktop/gui_internal.h"
+#include "desktop/bitmap.h"
+#include "image/image_cache.h"
+
+static nserror
+ps4stb_create(const content_handler *handler,
+              lwc_string *imime_type,
+              const struct http_parameter *params,
+              llcache_handle *llcache,
+              const char *fallback_charset,
+              bool quirks,
+              struct content **c)
+{
+    struct content *img = calloc(1, sizeof(*img));
+    nserror err;
+
+    if (img == NULL)
+        return NSERROR_NOMEM;
+
+    err = content__init(img, handler, imime_type, params, llcache,
+                        fallback_charset, quirks);
+    if (err != NSERROR_OK) {
+        free(img);
+        return err;
+    }
+
+    *c = img;
+    return NSERROR_OK;
+}
+
+static struct bitmap *
+ps4stb_cache_convert(struct content *c)
+{
+    const uint8_t *src;
+    size_t src_len;
+    int w = 0, h = 0, channels = 0;
+    unsigned char *rgba;
+    struct bitmap *bitmap;
+    uint8_t *dst;
+    size_t stride;
+
+    src = content__get_source_data(c, &src_len);
+    if (src == NULL || src_len == 0 || src_len > INT32_MAX)
+        return NULL;
+
+    rgba = stbi_load_from_memory(src, (int)src_len,
+                                 &w, &h, &channels, 4);
+    if (rgba == NULL || w <= 0 || h <= 0) {
+        if (rgba != NULL)
+            stbi_image_free(rgba);
+        return NULL;
+    }
+
+    bitmap = guit->bitmap->create(w, h, BITMAP_NONE);
+    if (bitmap == NULL) {
+        stbi_image_free(rgba);
+        return NULL;
+    }
+
+    dst = guit->bitmap->get_buffer(bitmap);
+    stride = guit->bitmap->get_rowstride(bitmap);
+    if (dst == NULL || stride < (size_t)w * 4) {
+        guit->bitmap->destroy(bitmap);
+        stbi_image_free(rgba);
+        return NULL;
+    }
+
+    for (int y = 0; y < h; y++) {
+        memcpy(dst + ((size_t)y * stride),
+               rgba + ((size_t)y * (size_t)w * 4),
+               (size_t)w * 4);
+    }
+
+    stbi_image_free(rgba);
+
+    /*
+     * stb_image emits ordinary RGBA. Convert once into whatever client
+     * bitmap layout the framebuffer selected.
+     */
+    bitmap_format_to_client(bitmap, &(bitmap_fmt_t) {
+        .layout = BITMAP_LAYOUT_R8G8B8A8,
+        .pma = false,
+    });
+
+    {
+        bool opaque = bitmap_test_opaque(bitmap);
+        guit->bitmap->set_opaque(bitmap, opaque);
+    }
+    guit->bitmap->modified(bitmap);
+
+    return bitmap;
+}
+
+static bool
+ps4stb_convert(struct content *c)
+{
+    const uint8_t *src;
+    size_t src_len;
+    int w = 0, h = 0, channels = 0;
+
+    src = content__get_source_data(c, &src_len);
+    if (src == NULL || src_len == 0 || src_len > INT32_MAX)
+        return false;
+
+    if (stbi_info_from_memory(src, (int)src_len, &w, &h, &channels) == 0 ||
+        w <= 0 || h <= 0) {
+        NSLOG(netsurf, INFO, "PS4 stb_image could not identify image");
+        return false;
+    }
+
+    c->width = w;
+    c->height = h;
+    c->size = (size_t)w * (size_t)h * 4;
+
+    image_cache_add(c, NULL, ps4stb_cache_convert);
+    content_set_ready(c);
+    content_set_done(c);
+    content_set_status(c, "");
+
+    return true;
+}
+
+static nserror
+ps4stb_clone(const struct content *old, struct content **new_c)
+{
+    struct content *img = calloc(1, sizeof(*img));
+    nserror err;
+
+    if (img == NULL)
+        return NSERROR_NOMEM;
+
+    err = content__clone(old, img);
+    if (err != NSERROR_OK) {
+        content_destroy(img);
+        return err;
+    }
+
+    if (old->status == CONTENT_STATUS_READY ||
+        old->status == CONTENT_STATUS_DONE) {
+        if (!ps4stb_convert(img)) {
+            content_destroy(img);
+            return NSERROR_CLONE_FAILED;
+        }
+    }
+
+    *new_c = img;
+    return NSERROR_OK;
+}
+
+static const content_handler ps4stb_content_handler = {
+    .create = ps4stb_create,
+    .data_complete = ps4stb_convert,
+    .destroy = image_cache_destroy,
+    .redraw = image_cache_redraw,
+    .clone = ps4stb_clone,
+    .get_internal = image_cache_get_internal,
+    .type = image_cache_content_type,
+    .is_opaque = image_cache_is_opaque,
+    .no_share = false,
+};
+
+static const char *ps4stb_types[] = {
+    "image/png",
+    "image/x-png",
+    "image/jpeg",
+    "image/jpg",
+    "image/pjpeg",
+    "image/gif",
+    "image/bmp",
+    "image/x-bmp"
+};
+
+CONTENT_FACTORY_REGISTER_TYPES(ps4stb, ps4stb_types, ps4stb_content_handler);
+
+#endif
+EOF
+
+python3 - <<'PY'
+from pathlib import Path
+p = Path("content/handlers/image/Makefile")
+s = p.read_text()
+if "ps4_stb.c" not in s:
+    s = s.replace(
+        "S_IMAGE_YES := image.c image_cache.c",
+        "S_IMAGE_YES := image.c image_cache.c ps4_stb.c"
+    )
+p.write_text(s)
+PY
+
 # On PS4 do not make NetSurf's mandatory UA stylesheets depend on
 # POSIX realpath/stat/access. Embed them into the executable and expose them
 # through gui_fetch_table.get_resource_data().
