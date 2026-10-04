@@ -62,7 +62,7 @@ COMMON=(--target=$HOST -fPIC -funwind-tables -isysroot "$OO_PS4_TOOLCHAIN" -isys
 if [[ "\$compile" == 1 ]]; then
     exec clang-18 "\${COMMON[@]}" "\$@"
 fi
-exec clang-18 "\${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--no-dynamic-linker -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceImeDialog -lSceIme -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
+exec clang-18 "\${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--no-dynamic-linker -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceMsgDialog -lSceImeDialog -lSceIme -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
 EOF
 chmod +x "$TOOLS/ps4-gcc"
 
@@ -207,7 +207,7 @@ s = s.replace(
 )
 s = s.replace(
     "static const char *feurl;",
-    "static const char *feurl;\n#ifdef ORBIS\nstatic const char *ps4_network_test_page(void);\n#endif"
+    "static const char *feurl;\n#ifdef ORBIS\nstatic void ps4_show_network_probe_dialog(void);\n#endif"
 )
 
 # Hardware startup diagnostic.  This deliberately runs before NetSurf core
@@ -216,7 +216,7 @@ s = s.replace(
 if '#include <SDL2/SDL.h>' not in s:
     s = s.replace(
         '#include <stdbool.h>',
-        '#include <stdbool.h>\n#ifdef ORBIS\n#include <SDL2/SDL.h>\n#include <orbis/ImeDialog.h>\n#include <orbis/Sysmodule.h>\n#include <orbis/Http.h>\n#include <orbis/Net.h>\n#include <orbis/Ssl.h>\n#endif'
+        '#include <stdbool.h>\n#ifdef ORBIS\n#include <SDL2/SDL.h>\n#include <orbis/ImeDialog.h>\n#include <orbis/Sysmodule.h>\n#include <orbis/Http.h>\n#include <orbis/Net.h>\n#include <orbis/Ssl.h>\n#include <orbis/CommonDialog.h>\n#include <orbis/MsgDialog.h>\n#endif'
     )
 
 diag = r'''
@@ -447,38 +447,23 @@ done:
     return r;
 }
 
-static void ps4_percent_encode(const char *src, char *dst, size_t cap)
+static inline void ps4_common_dialog_base_init(OrbisCommonDialogBaseParam *param)
 {
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-
-    if (cap == 0) return;
-
-    for (size_t i = 0; src[i] != '\0' && o + 1 < cap; i++) {
-        unsigned char c = (unsigned char)src[i];
-        bool safe = (c >= 'A' && c <= 'Z') ||
-                    (c >= 'a' && c <= 'z') ||
-                    (c >= '0' && c <= '9') ||
-                    c == '-' || c == '_' || c == '.' || c == '~';
-
-        if (safe) {
-            dst[o++] = (char)c;
-        } else {
-            if (o + 3 >= cap) break;
-            dst[o++] = '%';
-            dst[o++] = hex[(c >> 4) & 0xF];
-            dst[o++] = hex[c & 0xF];
-        }
-    }
-
-    dst[o] = '\0';
+    memset(param, 0, sizeof(*param));
+    param->size = sizeof(*param);
+    param->magic = (uint32_t)(ORBIS_COMMON_DIALOG_MAGIC_NUMBER + (uint64_t)param);
 }
 
-static const char *ps4_network_test_page(void)
+static inline void ps4_msg_dialog_param_init(OrbisMsgDialogParam *param)
 {
-    static char data_url[16384];
-    char html[4096];
-    char encoded[12288];
+    memset(param, 0, sizeof(*param));
+    ps4_common_dialog_base_init(&param->baseParam);
+    param->size = sizeof(*param);
+}
+
+static void ps4_show_network_probe_dialog(void)
+{
+    char message[1400];
 
     struct ps4_probe_result http_r = {0};
     struct ps4_probe_result https_r = {0};
@@ -517,22 +502,13 @@ static const char *ps4_network_test_page(void)
     https_r = ps4_native_probe(http, "https://www.google.com/generate_204");
 
 render:
-    snprintf(html, sizeof(html),
-        "<html><head><title>PS4 Network Test</title>"
-        "<style>"
-        "body{background:#101820;color:white;font-family:sans-serif;margin:70px;}"
-        "h1{font-size:52px;}p{font-size:30px;line-height:1.5;}"
-        "a{display:block;background:white;color:black;padding:30px;margin-top:35px;"
-        "font-size:36px;text-decoration:none;border:3px solid #777;}"
-        "</style></head><body>"
-        "<h1>PS4 Browser - teste nativo de rede</h1>"
-        "<p>HTTP example.com: stage=%s code=0x%08x status=%d bytes=%d</p>"
-        "<p>HTTPS Google: stage=%s code=0x%08x status=%d bytes=%d</p>"
-        "<p>Se os dois mostrarem stage=OK, a internet do PS4 esta funcionando "
-        "e o defeito esta somente na ponte NetSurf - sceHttp.</p>"
-        "<a href='http://example.com/'>TESTAR EXAMPLE PELO NETSURF</a>"
-        "<a href='https://www.google.com/'>ABRIR GOOGLE PELO NETSURF</a>"
-        "</body></html>",
+    snprintf(message, sizeof(message),
+        "PS4 Browser - teste nativo de rede\n\n"
+        "HTTP example.com\n"
+        "stage=%s\ncode=0x%08x\nstatus=%d\nbytes=%d\n\n"
+        "HTTPS Google\n"
+        "stage=%s\ncode=0x%08x\nstatus=%d\nbytes=%d\n\n"
+        "Feche com X. Depois o NetSurf tentara abrir o Google.",
         ps4_probe_stage_name(http_r.stage), (unsigned)http_r.code,
         http_r.http_status, http_r.bytes,
         ps4_probe_stage_name(https_r.stage), (unsigned)https_r.code,
@@ -542,9 +518,34 @@ render:
     if (ssl >= 0) sceSslTerm(ssl);
     if (net_pool >= 0) sceNetPoolDestroy(net_pool);
 
-    ps4_percent_encode(html, encoded, sizeof(encoded));
-    snprintf(data_url, sizeof(data_url), "data:text/html,%s", encoded);
-    return data_url;
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_MESSAGE_DIALOG);
+    (void)sceCommonDialogInitialize();
+
+    {
+        OrbisMsgDialogParam param;
+        OrbisMsgDialogUserMessageParam user_msg;
+        OrbisMsgDialogResult result;
+
+        ps4_msg_dialog_param_init(&param);
+        memset(&user_msg, 0, sizeof(user_msg));
+        memset(&result, 0, sizeof(result));
+
+        param.mode = ORBIS_MSG_DIALOG_MODE_USER_MSG;
+        user_msg.msg = message;
+        user_msg.buttonType = ORBIS_MSG_DIALOG_BUTTON_TYPE_OK;
+        param.userMsgParam = &user_msg;
+
+        if (sceMsgDialogInitialize() >= 0 &&
+            sceMsgDialogOpen(&param) >= 0) {
+            while (sceMsgDialogUpdateStatus() !=
+                   ORBIS_COMMON_DIALOG_STATUS_FINISHED) {
+                SDL_Delay(16);
+            }
+            sceMsgDialogClose();
+            (void)sceMsgDialogGetResult(&result);
+            sceMsgDialogTerminate();
+        }
+    }
 }
 #endif
 
@@ -712,7 +713,8 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = ps4_network_test_page();
+	ps4_show_network_probe_dialog();
+	feurl = "https://www.google.com/";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
@@ -824,7 +826,7 @@ EOF
 export GCCSDK_INSTALL_ENV="$PREFIX"
 export GCCSDK_INSTALL_CROSSBIN="$TOOLS"
 
-NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceImeDialog -lSceIme"
+NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceMsgDialog -lSceImeDialog -lSceIme"
 
 env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$NETSURF_LDFLAGS" make -j2 TARGET=framebuffer "CC=$TOOLS/ps4-gcc" "CXX=$TOOLS/ps4-g++" "PKG_CONFIG=$TOOLS/ps4-pkg-config" Q= VQ=
 
