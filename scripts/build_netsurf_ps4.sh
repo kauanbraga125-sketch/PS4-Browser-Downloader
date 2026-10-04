@@ -353,11 +353,10 @@ s = s.replace(
 s = s.replace(
     "\t/* Override, since we have no support for non-core SELECT menu */",
     "#ifdef ORBIS\n"
-    "\t/* Re-enable author CSS for real site layout. Images stay off until */\n"
-    "\t/* PS4-side PNG/JPEG/SVG decoding is integrated. */\n"
+    "\t/* Re-enable real site CSS and common raster images. */\n"
     "\tnsoption_set_bool(author_level_css, true);\n"
-    "\tnsoption_set_bool(foreground_images, false);\n"
-    "\tnsoption_set_bool(background_images, false);\n"
+    "\tnsoption_set_bool(foreground_images, true);\n"
+    "\tnsoption_set_bool(background_images, true);\n"
     "\tnsoption_set_bool(animate_images, false);\n"
     "#endif\n\n"
     "\t/* Override, since we have no support for non-core SELECT menu */"
