@@ -1,8 +1,8 @@
-name: Build PS4 Hybrid Browser v7.8.2 SDL Safe
+name: Build SuperPSX Client v1
 
 on:
   push:
-    branches: [ hybrid-v7-8-2-sdl-safe ]
+    branches: [ superpsx-client-v1 ]
   workflow_dispatch:
 
 permissions:
@@ -89,8 +89,8 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_8_2_SDLSafe.pkg
-          sha256sum PS4_Hybrid_Browser_v7_8_2_SDLSafe.pkg > PS4_Hybrid_Browser_v7_8_2_SDLSafe.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg SuperPSX_Client_v1.pkg
+          sha256sum SuperPSX_Client_v1.pkg > SuperPSX_Client_v1.pkg.sha256
 
       - name: Validate hybrid backend
         run: |
@@ -111,16 +111,16 @@ jobs:
       - name: Package hybrid backend
         run: |
           set -euxo pipefail
-          python3 -m zipfile -c PS4_Hybrid_Browser_Backend_v7_8_2.zip backend
-          test -s PS4_Hybrid_Browser_Backend_v7_8_2.zip
+          python3 -m zipfile -c SuperPSX_Client_Backend_unused.zip backend
+          test -s SuperPSX_Client_Backend_unused.zip
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Hybrid-Browser-v7-8-2-SDLSafe
+          name: SuperPSX-Client-v1
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Hybrid_Browser_v7_8_2_SDLSafe.pkg
-            PS4_Hybrid_Browser_v7_8_2_SDLSafe.pkg.sha256
-            PS4_Hybrid_Browser_Backend_v7_8_2.zip
+            SuperPSX_Client_v1.pkg
+            SuperPSX_Client_v1.pkg.sha256
+            SuperPSX_Client_Backend_unused.zip
