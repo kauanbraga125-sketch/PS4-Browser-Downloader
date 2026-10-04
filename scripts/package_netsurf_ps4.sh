@@ -57,10 +57,10 @@ for file in "${files[@]}"; do
 done
 
 echo "==> create GP4 with ${#files[@]} files"
-"$TOOLBIN/create-gp4"   -out "$OUTDIR/netsurf-ps4.gp4"   --content-id="$CONTENT_ID"   --files "$file_list"
+"$TOOLBIN/create-gp4"   -out "$PKGROOT/pkg.gp4"   --content-id="$CONTENT_ID"   --files "$file_list"
 
 echo "==> build PKG"
-"$TOOLBIN/PkgTool.Core" pkg_build "$OUTDIR/netsurf-ps4.gp4" "$OUTDIR"
+"$TOOLBIN/PkgTool.Core" pkg_build "$PKGROOT/pkg.gp4" "$OUTDIR"
 
 pkg="$(find "$OUTDIR" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
 test -n "$pkg"
