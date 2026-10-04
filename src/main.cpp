@@ -6,7 +6,14 @@
 #include <orbis/Ssl.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/UserService.h>
+#include <orbis/Pad.h>
+#include <orbis/ImeDialog.h>
 #include <orbis/libkernel.h>
+#include <SDL2/SDL.h>
+
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_PNG
+#include <stb/stb_image.h>
 
 #include <algorithm>
 #include <cctype>
@@ -23,6 +30,7 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/types.h>
+#include <cwchar>
 
 namespace {
 
@@ -265,7 +273,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.2", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1306,6 +1314,303 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     }
 }
 
+
+static bool http_get_bytes_native(const std::string& url,
+                                  std::vector<uint8_t>& out,
+                                  int32_t* statusOut = nullptr) {
+    out.clear();
+    if (!init_network()) return false;
+
+    const int tmpl = sceHttpCreateTemplate(
+        g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
+    if (tmpl < 0) return false;
+
+    const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
+    if (conn < 0) {
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    const int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url.c_str(), 0);
+    if (req < 0) {
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    sceHttpAddRequestHeader(req, "Accept", "*/*", 1);
+    sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
+    sceHttpSetConnectTimeOut(req, 5 * 1000 * 1000);
+    sceHttpSetResolveTimeOut(req, 5 * 1000 * 1000);
+
+    const int32_t send = sceHttpSendRequest(req, nullptr, 0);
+    if (send < 0) {
+        sceHttpDeleteRequest(req);
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    int32_t status = 0;
+    sceHttpGetStatusCode(req, &status);
+    if (statusOut) *statusOut = status;
+    if (status < 200 || status >= 300) {
+        sceHttpDeleteRequest(req);
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    uint8_t buf[32 * 1024];
+    for (;;) {
+        const int n = sceHttpReadData(req, buf, sizeof(buf));
+        if (n < 0) {
+            out.clear();
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return false;
+        }
+        if (n == 0) break;
+        out.insert(out.end(), buf, buf + n);
+        if (out.size() > 12 * 1024 * 1024) {
+            out.clear();
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return false;
+        }
+    }
+
+    sceHttpDeleteRequest(req);
+    sceHttpDeleteConnection(conn);
+    sceHttpDeleteTemplate(tmpl);
+    return !out.empty();
+}
+
+static bool http_get_text_native(const std::string& url,
+                                 std::string& out,
+                                 int32_t* statusOut = nullptr) {
+    std::vector<uint8_t> bytes;
+    int32_t status = 0;
+    const bool ok = http_get_bytes_native(url, bytes, &status);
+    if (statusOut) *statusOut = status;
+    if (!ok) {
+        out.clear();
+        return false;
+    }
+    out.assign(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    out = trim_copy(out);
+    return true;
+}
+
+static bool http_post_json_native(const std::string& url,
+                                  const std::string& body) {
+    if (!init_network()) return false;
+
+    const int tmpl = sceHttpCreateTemplate(
+        g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
+    if (tmpl < 0) return false;
+
+    const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
+    if (conn < 0) {
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    const int req = sceHttpCreateRequestWithURL(
+        conn, ORBIS_METHOD_POST, url.c_str(), body.size());
+    if (req < 0) {
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+        return false;
+    }
+
+    sceHttpAddRequestHeader(req, "Content-Type", "application/json", 1);
+    sceHttpAddRequestHeader(req, "Accept", "application/json,text/plain,*/*", 1);
+    sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
+    sceHttpSetConnectTimeOut(req, 5 * 1000 * 1000);
+    sceHttpSetResolveTimeOut(req, 5 * 1000 * 1000);
+
+    const int32_t send = sceHttpSendRequest(
+        req, body.empty() ? nullptr : body.data(), body.size());
+    int32_t status = 0;
+    if (send >= 0) sceHttpGetStatusCode(req, &status);
+
+    sceHttpDeleteRequest(req);
+    sceHttpDeleteConnection(conn);
+    sceHttpDeleteTemplate(tmpl);
+    return send >= 0 && status >= 200 && status < 300;
+}
+
+static bool http_post_empty_native(const std::string& url) {
+    return http_post_json_native(url, "{}");
+}
+
+static std::string wide_to_utf8(const wchar_t* ws) {
+    std::string out;
+    if (!ws) return out;
+    for (size_t i = 0; ws[i]; ++i) {
+        uint32_t cp = static_cast<uint32_t>(ws[i]);
+        if (cp <= 0x7F) {
+            out.push_back(static_cast<char>(cp));
+        } else if (cp <= 0x7FF) {
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else if (cp <= 0xFFFF) {
+            out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        } else {
+            out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+        }
+    }
+    return out;
+}
+
+static bool open_url_ime(std::string& value) {
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_IME_DIALOG);
+
+    wchar_t buffer[1024]{};
+    const wchar_t title[] = L"URL ou pesquisa";
+    const wchar_t placeholder[] = L"Digite um endereco ou pesquisa";
+
+    OrbisImeDialogSetting setting{};
+    int32_t user = 0;
+    sceUserServiceGetInitialUser(&user);
+    setting.userId = static_cast<uint32_t>(user);
+    setting.type = ORBIS_TYPE_DEFAULT;
+    setting.supportedLanguages = 0;
+    setting.enterLabel = ORBIS_BUTTON_LABEL_GO;
+    setting.inputMethod = ORBIS__DEFAULT;
+    setting.maxTextLength = 1023;
+    setting.inputTextBuffer = buffer;
+    setting.horizontalAlignment = ORBIS_H_CENTER;
+    setting.verticalAlignment = ORBIS_V_CENTER;
+    setting.placeholder = placeholder;
+    setting.title = title;
+
+    const int32_t r = sceImeDialogInit(&setting, nullptr);
+    if (r < 0) {
+        notify_user("Hybrid: falha abrindo teclado - " + hex32(r));
+        return false;
+    }
+
+    while (sceImeDialogGetStatus() == ORBIS_DIALOG_STATUS_RUNNING)
+        usleep(16 * 1000);
+
+    OrbisDialogResult result{};
+    const int32_t rr = sceImeDialogGetResult(&result);
+    const bool accepted = rr >= 0 && result.endstatus == ORBIS_DIALOG_OK;
+    if (accepted) value = wide_to_utf8(buffer);
+    (void)sceImeDialogTerm();
+    return accepted && !value.empty();
+}
+
+static bool fetch_and_scale_frame(const std::string& backend,
+                                  SDL_Surface* scaledSurface) {
+    static uint64_t counter = 0;
+    std::vector<uint8_t> png;
+    const std::string url = backend + "/shot?t=" + std::to_string(++counter);
+    if (!http_get_bytes_native(url, png)) return false;
+
+    int w = 0, h = 0, channels = 0;
+    stbi_uc* pixels = stbi_load_from_memory(
+        png.data(), static_cast<int>(png.size()), &w, &h, &channels, 4);
+    if (!pixels || w <= 0 || h <= 0) {
+        if (pixels) stbi_image_free(pixels);
+        return false;
+    }
+
+    SDL_Surface* src = SDL_CreateRGBSurfaceFrom(
+        pixels, w, h, 32, w * 4,
+        0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
+    if (!src) {
+        stbi_image_free(pixels);
+        return false;
+    }
+
+    SDL_FillRect(scaledSurface, nullptr,
+                 SDL_MapRGB(scaledSurface->format, 0, 0, 0));
+    SDL_Rect dst{0, 0, SCREEN_W, SCREEN_H};
+    const int rc = SDL_BlitScaled(src, nullptr, scaledSurface, &dst);
+
+    SDL_FreeSurface(src);
+    stbi_image_free(pixels);
+    return rc == 0;
+}
+
+static void draw_cursor(SDL_Surface* surface, int x, int y) {
+    const Uint32 red = SDL_MapRGB(surface->format, 255, 40, 40);
+    SDL_Rect h{x - 14, y - 2, 29, 5};
+    SDL_Rect v{x - 2, y - 14, 5, 29};
+    SDL_FillRect(surface, &h, red);
+    SDL_FillRect(surface, &v, red);
+}
+
+static bool backend_api(const std::string& backend,
+                        const char* path,
+                        const std::string& json = "{}") {
+    return http_post_json_native(backend + path, json);
+}
+
+static bool process_pending_download(const std::string& backend) {
+    std::string handoff;
+    int32_t status = 0;
+    if (!http_get_text_native(backend + "/api/pending-download", handoff, &status))
+        return false;
+    if (handoff.empty()) return false;
+
+    const size_t pos = handoff.find("/handoff/");
+    if (pos == std::string::npos) {
+        (void)backend_api(backend, "/api/ack-download");
+        return false;
+    }
+
+    std::string fileUrl = backend + handoff;
+    const size_t fullPos = fileUrl.find("/handoff/");
+    fileUrl.replace(fullPos, 9, "/file/");
+    append_diag("NATIVE_FILE_URL", fileUrl);
+
+    bool ok = false;
+    PkgInfo pkg;
+    if (fetch_pkg_header(fileUrl, pkg)) {
+        g_status = "Native: PKG detectado; BGFT...";
+        ok = queue_bgft(fileUrl);
+        notify_user(ok ? "Hybrid: PKG enviado ao BGFT."
+                       : ("Hybrid: falha no BGFT - " + g_status));
+    } else {
+        UrlProbe probe = probe_url(fileUrl, backend);
+        if (!probe.ok) {
+            usleep(250 * 1000);
+            probe = probe_url(fileUrl, backend);
+        }
+        if (probe.ok) {
+            ok = queue_generic_background(probe);
+            notify_user(ok ? ("Hybrid: download iniciado - " +
+                              filename_for_probe(probe))
+                           : ("Hybrid: falha no download - " + g_status));
+        } else {
+            notify_user("Hybrid: backend nao entregou o arquivo.");
+        }
+    }
+
+    // A task is one-shot from the browser UI. Avoid an endless retry loop.
+    (void)backend_api(backend, "/api/ack-download");
+    return ok;
+}
+
+static int open_native_pad() {
+    scePadInit();
+    sceUserServiceInitialize(nullptr);
+    int32_t user = 0;
+    sceUserServiceGetInitialUser(&user);
+    return scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -1313,28 +1618,197 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.2 legacy UI");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.3 native client");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
         append_diag("DAEMON_WARN", g_status);
-        notify_user("Hybrid: BinLoader/daemon indisponivel. Arquivos comuns nao terao background.");
+        notify_user("Hybrid: daemon indisponivel. Navegacao funciona; arquivos comuns podem nao baixar em background.");
     }
 
     std::string backend = discover_hybrid_backend();
     if (backend.empty()) {
-        append_diag("HYBRID_FATAL", "backend nao encontrado");
-        notify_user("Hybrid: backend Chromium nao encontrado. Inicie o start_windows.bat e libere a rede privada.");
+        notify_user("Hybrid: backend Chromium nao encontrado. Rode start_windows.bat no PC.");
+        sleep(4);
+        clean_exit_to_shell();
+    }
+    while (!backend.empty() && backend.back() == '/') backend.pop_back();
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        notify_user(std::string("Hybrid: SDL_Init falhou - ") + SDL_GetError());
         sleep(4);
         clean_exit_to_shell();
     }
 
-    while (!backend.empty() && backend.back() == '/') backend.pop_back();
-    const std::string uiUrl = backend + "/ps4";
-    append_diag("HYBRID_OPEN", uiUrl);
-    notify_user("Hybrid v7.2: backend encontrado. Abrindo interface simples.");
-    (void)open_browser_and_wait(uiUrl.c_str());
+    SDL_Window* window = SDL_CreateWindow(
+        "PS4 Hybrid Browser v7.3",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        SCREEN_W, SCREEN_H, 0);
+    if (!window) {
+        notify_user(std::string("Hybrid: SDL_CreateWindow falhou - ") + SDL_GetError());
+        sleep(4);
+        clean_exit_to_shell();
+    }
 
+    SDL_Surface* screen = SDL_GetWindowSurface(window);
+    if (!screen) {
+        notify_user("Hybrid: SDL_GetWindowSurface falhou");
+        sleep(4);
+        clean_exit_to_shell();
+    }
+
+    SDL_Surface* frame = SDL_CreateRGBSurface(
+        0, SCREEN_W, SCREEN_H, 32,
+        0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+    if (!frame) {
+        notify_user("Hybrid: nao foi possivel criar framebuffer");
+        sleep(4);
+        clean_exit_to_shell();
+    }
+
+    SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 18, 18, 18));
+    SDL_BlitSurface(frame, nullptr, screen, nullptr);
+    SDL_UpdateWindowSurface(window);
+
+    const int pad = open_native_pad();
+    if (pad < 0) {
+        notify_user("Hybrid: controle PS4 nao abriu");
+        sleep(4);
+        clean_exit_to_shell();
+    }
+
+    notify_user("Hybrid v7.3: X clicar | O voltar | R2 URL | triangulo baixar imagem | Options sair");
+
+    int cursorX = SCREEN_W / 2;
+    int cursorY = SCREEN_H / 2;
+    uint32_t oldButtons = 0;
+    uint64_t frameTick = 0;
+    uint64_t downloadTick = 0;
+    bool redraw = true;
+    bool frameEverLoaded = false;
+
+    for (;;) {
+        SDL_PumpEvents();
+
+        const uint64_t now = static_cast<uint64_t>(SDL_GetTicks());
+
+        // Refresh Chromium screenshot roughly 3 times per second.
+        if (!frameEverLoaded || now - frameTick >= 330) {
+            if (fetch_and_scale_frame(backend, frame)) {
+                frameEverLoaded = true;
+                redraw = true;
+            } else if (!frameEverLoaded) {
+                SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 45, 45, 45));
+                redraw = true;
+            }
+            frameTick = now;
+        }
+
+        // Poll browser-triggered downloads without involving WebBrowserDialog.
+        if (now - downloadTick >= 1000) {
+            (void)process_pending_download(backend);
+            downloadTick = now;
+        }
+
+        OrbisPadData pd{};
+        if (scePadReadState(pad, &pd) >= 0) {
+            const uint32_t pressed = pd.buttons & ~oldButtons;
+            oldButtons = pd.buttons;
+
+            int dx = static_cast<int>(pd.leftStick.x) - 128;
+            int dy = static_cast<int>(pd.leftStick.y) - 128;
+            if (std::abs(dx) < 18) dx = 0;
+            if (std::abs(dy) < 18) dy = 0;
+            if (dx || dy) {
+                cursorX += dx / 14;
+                cursorY += dy / 14;
+                cursorX = std::max(0, std::min(SCREEN_W - 1, cursorX));
+                cursorY = std::max(0, std::min(SCREEN_H - 1, cursorY));
+                redraw = true;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_CROSS) {
+                const int bx = cursorX * 1280 / SCREEN_W;
+                const int by = cursorY * 720 / SCREEN_H;
+                backend_api(backend, "/api/click",
+                    "{\"x\":" + std::to_string(bx) +
+                    ",\"y\":" + std::to_string(by) + "}");
+                frameTick = 0;
+            }
+
+            if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
+                (pressed & ORBIS_PAD_BUTTON_L1)) {
+                backend_api(backend, "/api/back");
+                frameTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_R1) {
+                backend_api(backend, "/api/forward");
+                frameTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_SQUARE) {
+                backend_api(backend, "/api/reload");
+                frameTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_UP) {
+                backend_api(backend, "/api/scroll", "{\"y\":-550}");
+                frameTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_DOWN) {
+                backend_api(backend, "/api/scroll", "{\"y\":550}");
+                frameTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) {
+                const int bx = cursorX * 1280 / SCREEN_W;
+                const int by = cursorY * 720 / SCREEN_H;
+                backend_api(backend, "/api/image-at",
+                    "{\"x\":" + std::to_string(bx) +
+                    ",\"y\":" + std::to_string(by) + "}");
+                notify_user("Hybrid: procurando imagem sob o cursor...");
+                downloadTick = 0;
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_R2) {
+                std::string text;
+                if (open_url_ime(text)) {
+                    backend_api(backend, "/api/nav",
+                        "{\"url\":\"" + json_escape(text) + "\"}");
+                    frameTick = 0;
+                }
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_R3) {
+                std::string text;
+                if (open_url_ime(text)) {
+                    backend_api(backend, "/api/type",
+                        "{\"text\":\"" + json_escape(text) + "\"}");
+                    frameTick = 0;
+                }
+            }
+
+            if (pressed & ORBIS_PAD_BUTTON_OPTIONS) {
+                notify_user("Hybrid: fechando cliente. Downloads ja enviados continuam no sistema/daemon.");
+                break;
+            }
+        }
+
+        if (redraw) {
+            SDL_BlitSurface(frame, nullptr, screen, nullptr);
+            draw_cursor(screen, cursorX, cursorY);
+            SDL_UpdateWindowSurface(window);
+            redraw = false;
+        }
+
+        usleep(16 * 1000);
+    }
+
+    SDL_FreeSurface(frame);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
     clean_exit_to_shell();
     return 0;
 }

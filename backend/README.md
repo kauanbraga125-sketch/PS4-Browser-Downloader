@@ -34,3 +34,22 @@ básicos e uma captura PNG clicável.
 
 Se a interface abrir corretamente você verá fundo branco, título "PS4 Hybrid Browser v7.2",
 barra de URL, botões e a imagem da página Chromium.
+
+
+## v7.3 - cliente grafico nativo
+
+O PS4 nao usa mais WebBrowserDialog para mostrar a interface. Ele baixa /shot do backend,
+decodifica o PNG e desenha diretamente em 1920x1080 via SDL. Controle:
+- Analogico esquerdo: cursor
+- X: clicar
+- O ou L1: voltar
+- R1: avancar
+- Quadrado: recarregar
+- D-pad cima/baixo: scroll
+- R2: URL/pesquisa pelo teclado do PS4
+- R3: digitar no campo focado da pagina
+- Triangulo: baixar imagem sob o cursor
+- Options: sair
+
+Downloads concluidos pelo Chromium sao detectados automaticamente pelo cliente nativo
+e enviados a BGFT (PKG) ou ao daemon de arquivos comuns.

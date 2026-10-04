@@ -1,8 +1,8 @@
-name: Build PS4 Hybrid Browser v7.2 Legacy UI
+name: Build PS4 Hybrid Browser v7.3 Native Client
 
 on:
   push:
-    branches: [ hybrid-v7-2-legacy-ui ]
+    branches: [ hybrid-v7-3-native-client ]
   workflow_dispatch:
 
 permissions:
@@ -89,8 +89,8 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_2.pkg
-          sha256sum PS4_Hybrid_Browser_v7_2.pkg > PS4_Hybrid_Browser_v7_2.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_3_Native.pkg
+          sha256sum PS4_Hybrid_Browser_v7_3_Native.pkg > PS4_Hybrid_Browser_v7_3_Native.pkg.sha256
 
       - name: Validate hybrid backend
         run: |
@@ -99,21 +99,22 @@ jobs:
           python3 -m json.tool backend/package.json >/dev/null
           grep -q 'app.get("/ps4"' backend/server.js
           grep -q 'app.post("/legacy/click"' backend/server.js
+          grep -q 'app.get("/api/pending-download"' backend/server.js
           grep -q 'input type=\\\"image\\\"' backend/server.js
 
       - name: Package hybrid backend
         run: |
           set -euxo pipefail
-          python3 -m zipfile -c PS4_Hybrid_Browser_Backend_v7_2.zip backend
-          test -s PS4_Hybrid_Browser_Backend_v7_2.zip
+          python3 -m zipfile -c PS4_Hybrid_Browser_Backend_v7_3.zip backend
+          test -s PS4_Hybrid_Browser_Backend_v7_3.zip
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Hybrid-Browser-v7-2
+          name: PS4-Hybrid-Browser-v7-3-Native
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Hybrid_Browser_v7_2.pkg
-            PS4_Hybrid_Browser_v7_2.pkg.sha256
-            PS4_Hybrid_Browser_Backend_v7_2.zip
+            PS4_Hybrid_Browser_v7_3_Native.pkg
+            PS4_Hybrid_Browser_v7_3_Native.pkg.sha256
+            PS4_Hybrid_Browser_Backend_v7_3.zip

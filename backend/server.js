@@ -270,7 +270,7 @@ app.get("/ps4", function(req, res) {
   });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.2.0" });
+  res.json({ ok: true, version: "7.3.0" });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -363,6 +363,18 @@ app.post("/legacy/image-at", async function(req, res) {
     lastMessage = "Falha ao identificar imagem: " + String(e.message || e);
   }
   backToUi(res, "image");
+});
+
+
+app.get("/api/pending-download", function(_req, res) {
+  if (!lastDownload || lastDownload.preparing || !lastDownload.handoff)
+    return res.status(204).end();
+  res.set("Cache-Control", "no-store");
+  res.type("text").send(lastDownload.handoff);
+});
+app.post("/api/ack-download", function(_req, res) {
+  lastDownload = null;
+  res.json({ ok: true });
 });
 
 app.get("/api/state", async function(_req, res) {

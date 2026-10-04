@@ -1,5 +1,5 @@
-TITLE       := PS4 Hybrid Browser v7.2
-VERSION     := 07.20
+TITLE       := PS4 Hybrid Browser v7.3 Native
+VERSION     := 07.30
 TITLE_ID    := PBDL00001
 CONTENT_ID  := IV0000-PBDL00001_00-PS4BROWSERDL0001
 
@@ -12,7 +12,8 @@ CXX         := clang++
 LD          := ld.lld
 
 LIBS := -lc -lkernel -lc++ -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp \
-        -lSceAppInstUtil -lSceBgft
+        -lSceAppInstUtil -lSceBgft -lSceVideoOut -lSceAudioOut -lScePad \
+        -lSceImeDialog -lSceCommonDialog -lSDL2
 CFLAGS   := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -DORBIS -D_GNU_SOURCE \
             -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS := $(CFLAGS) -std=c++11 -fexceptions -fcxx-exceptions -isystem $(TOOLCHAIN)/include/c++/v1
