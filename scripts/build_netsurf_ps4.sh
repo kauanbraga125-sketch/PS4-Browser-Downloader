@@ -552,7 +552,7 @@ render:
 netdiag_anchor = """static int
 fb_url_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
 {"""
-if "ps4_network_test_page" not in s:
+if "struct ps4_probe_result" not in s:
     s = s.replace(netdiag_anchor, netdiag_code + "\n" + netdiag_anchor)
 
 
