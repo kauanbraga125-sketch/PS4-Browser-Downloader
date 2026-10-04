@@ -22,6 +22,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <time.h>
+#include <sys/types.h>
 
 namespace {
 
@@ -252,7 +253,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.0", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -778,29 +779,276 @@ static bool queue_generic_background(const UrlProbe& p) {
     return true;
 }
 
+
+static void append_diag(const char* tag, const std::string& value) {
+    mkdir("/data/PBDL", 0777);
+    int fd = open("/data/PBDL/navigation.log", O_WRONLY | O_CREAT | O_APPEND, 0666);
+    if (fd < 0) return;
+    char tbuf[64];
+    std::snprintf(tbuf, sizeof(tbuf), "%lld", static_cast<long long>(time(nullptr)));
+    std::string line = std::string(tbuf) + " [" + tag + "] " + value + "\n";
+    (void)write(fd, line.data(), line.size());
+    close(fd);
+}
+
+static std::string regex_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() * 2);
+    const char* met = R"(\.^$|()[]{}*+?)";
+    for (char c : in) {
+        if (std::strchr(met, c)) out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
+static std::string make_navigation_regex(const std::string& startUrl) {
+    // WebBrowserDialog's REGEXP callback is evaluated on top-level navigation.
+    // Exclude only the page being opened, then capture every subsequent http(s)
+    // navigation before the dialog tries to handle popup/download/new-window UI.
+    return "^(?!" + regex_escape(startUrl) + "$)(https?://.*|blob:.*|data:.*)$";
+}
+
+struct TextResponse {
+    bool ok = false;
+    int32_t status = 0;
+    std::string finalUrl;
+    std::string headers;
+    std::string body;
+};
+
+static TextResponse fetch_text(const std::string& input,
+                               const std::string& referer = "",
+                               const std::string& postData = "",
+                               const std::string& cookie = "") {
+    TextResponse out;
+    if (!init_network()) return out;
+
+    std::string current = input;
+    for (int redirect = 0; redirect < 8; ++redirect) {
+        const int tmpl = sceHttpCreateTemplate(
+            g_http,
+            "Mozilla/5.0 (PlayStation 4; WebKit) AppleWebKit/605.1.15 Safari/605.1.15",
+            ORBIS_HTTP_VERSION_1_1, 1);
+        if (tmpl < 0) return out;
+
+        const int conn = sceHttpCreateConnectionWithURL(tmpl, current.c_str(), true);
+        if (conn < 0) {
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        const bool doPost = !postData.empty();
+        const int req = sceHttpCreateRequestWithURL(
+            conn, doPost ? ORBIS_METHOD_POST : ORBIS_METHOD_GET, current.c_str(),
+            doPost ? postData.size() : 0);
+        if (req < 0) {
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        sceHttpAddRequestHeader(req, "Accept", "text/html,application/xhtml+xml,*/*;q=0.8", 1);
+        sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
+        if (!referer.empty()) sceHttpAddRequestHeader(req, "Referer", referer.c_str(), 1);
+        if (!cookie.empty()) sceHttpAddRequestHeader(req, "Cookie", cookie.c_str(), 1);
+        if (doPost)
+            sceHttpAddRequestHeader(req, "Content-Type", "application/x-www-form-urlencoded", 1);
+        sceHttpSetConnectTimeOut(req, 15 * 1000 * 1000);
+        sceHttpSetResolveTimeOut(req, 15 * 1000 * 1000);
+
+        int32_t r = sceHttpSendRequest(req, doPost ? postData.data() : nullptr,
+                                      doPost ? postData.size() : 0);
+        if (r < 0) {
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        int32_t code = 0;
+        sceHttpGetStatusCode(req, &code);
+
+        char* raw = nullptr;
+        size_t rawSize = 0;
+        std::string headers;
+        if (sceHttpGetAllResponseHeaders(req, &raw, &rawSize) >= 0 && raw && rawSize)
+            headers.assign(raw, rawSize);
+
+        const std::string location = header_value(headers, "location");
+        if (code >= 300 && code < 400 && !location.empty()) {
+            current = resolve_location(current, location);
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            continue;
+        }
+
+        std::string body;
+        body.reserve(64 * 1024);
+        char buf[16 * 1024];
+        while (body.size() < 2 * 1024 * 1024) {
+            int n = sceHttpReadData(req, buf, sizeof(buf));
+            if (n <= 0) break;
+            body.append(buf, static_cast<size_t>(n));
+        }
+
+        sceHttpDeleteRequest(req);
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+
+        out.ok = (code >= 200 && code < 400);
+        out.status = code;
+        out.finalUrl = current;
+        out.headers = headers;
+        out.body = body;
+        return out;
+    }
+    return out;
+}
+
+static std::string html_attr_near(const std::string& html,
+                                  const std::string& marker,
+                                  const std::string& attr) {
+    size_t p = html.find(marker);
+    if (p == std::string::npos) return "";
+    size_t begin = (p > 2048) ? p - 2048 : 0;
+    size_t end = std::min(html.size(), p + 4096);
+    std::string area = html.substr(begin, end - begin);
+
+    std::string needle1 = attr + "=\"";
+    size_t a = area.find(needle1);
+    if (a != std::string::npos) {
+        a += needle1.size();
+        size_t b = area.find('"', a);
+        if (b != std::string::npos) return area.substr(a, b - a);
+    }
+    std::string needle2 = attr + "='";
+    a = area.find(needle2);
+    if (a != std::string::npos) {
+        a += needle2.size();
+        size_t b = area.find('\'', a);
+        if (b != std::string::npos) return area.substr(a, b - a);
+    }
+    return "";
+}
+
+static std::string resolve_known_filehost(const std::string& input,
+                                          const std::string& referer) {
+    const std::string low = lower_copy(input);
+
+    // PixelDrain public file page -> direct API endpoint.
+    const std::string px = "https://pixeldrain.com/u/";
+    size_t p = low.find(px);
+    if (p == 0) {
+        std::string id = input.substr(px.size());
+        size_t cut = id.find_first_of("?#/");
+        if (cut != std::string::npos) id.resize(cut);
+        if (!id.empty()) {
+            std::string direct = "https://pixeldrain.com/api/file/" + id + "?download=";
+            append_diag("RESOLVER_PIXELDRAIN", direct);
+            return direct;
+        }
+    }
+
+    // MediaFire exposes the direct URL on #downloadButton.
+    if (low.find("mediafire.com/") != std::string::npos) {
+        TextResponse r = fetch_text(input, referer);
+        if (r.ok) {
+            std::string href = html_attr_near(r.body, "downloadButton", "href");
+            if (!href.empty()) {
+                href = resolve_location(r.finalUrl, href);
+                append_diag("RESOLVER_MEDIAFIRE", href);
+                return href;
+            }
+        }
+    }
+
+    // 1fichier free download flow: GET -> adz hidden value -> POST -> orange download href.
+    if (low.find("1fichier.com/") != std::string::npos) {
+        TextResponse first = fetch_text(input, referer);
+        if (first.ok) {
+            std::string adz = html_attr_near(first.body, "name=\"adz\"", "value");
+            if (adz.empty()) adz = html_attr_near(first.body, "name='adz'", "value");
+            if (!adz.empty()) {
+                std::string cookie;
+                size_t sc = lower_copy(first.headers).find("set-cookie:");
+                if (sc != std::string::npos) {
+                    size_t b = sc + 11;
+                    while (b < first.headers.size() && (first.headers[b] == ' ' || first.headers[b] == '\t')) ++b;
+                    size_t e = first.headers.find_first_of(";\r\n", b);
+                    if (e != std::string::npos) cookie = first.headers.substr(b, e - b);
+                }
+                std::string post = "adz=" + adz + "&did=0&dl_no_ssl=off&dlinline=on";
+                TextResponse second = fetch_text(first.finalUrl, first.finalUrl, post, cookie);
+                if (second.ok) {
+                    std::string href = html_attr_near(second.body, "btn-orange", "href");
+                    if (!href.empty()) {
+                        href = resolve_location(second.finalUrl, href);
+                        append_diag("RESOLVER_1FICHIER", href);
+                        return href;
+                    }
+                }
+            }
+        }
+    }
+
+    return input;
+}
+
 static bool handle_captured_url(const std::string& captured, const std::string& referer, std::string& reopenUrl) {
-    UrlProbe p = probe_url(captured, referer);
-    if (!p.ok) {
-        // Some protected pages refuse a probe but still render correctly in WebKit.
-        reopenUrl = captured;
+    append_diag("CAPTURE", captured);
+
+    if (captured.rfind("blob:", 0) == 0 || captured.rfind("data:", 0) == 0) {
+        // BrowserDialog cannot expose the bytes behind a blob/data navigation.
+        // Keep the originating page alive and record the exact unsupported scheme.
+        append_diag("BROWSERDIALOG_SCHEME_LIMIT", captured);
+        g_status = "Link blob/data capturado; requer WebKit2 direto.";
+        reopenUrl = referer;
         return false;
     }
+
+    const std::string resolved = resolve_known_filehost(captured, referer);
+    if (resolved != captured) append_diag("RESOLVED", resolved);
+
+    UrlProbe p = probe_url(resolved, referer);
+    if (!p.ok) {
+        // Warm DNS/TLS with a second short attempt; the user's SuperPSX tests
+        // consistently succeed on the second navigation.
+        usleep(250 * 1000);
+        p = probe_url(resolved, referer);
+    }
+
+    if (!p.ok) {
+        append_diag("PROBE_FAIL", resolved);
+        // Protected pages may refuse our native probe while still rendering in WebKit.
+        reopenUrl = resolved;
+        return false;
+    }
+
+    append_diag("PROBE",
+        std::to_string(p.status) + " " + p.contentType + " " +
+        std::to_string(p.contentLength) + " " + p.finalUrl);
 
     // Detect PKG by file magic, not only by the extension.
     PkgInfo info;
     if (fetch_pkg_header(p.finalUrl, info)) {
+        append_diag("PKG", p.finalUrl);
         g_status = "PKG detectado. Enviando ao BGFT...";
         return queue_bgft(p.finalUrl);
     }
 
     if (probe_is_download(p)) {
+        append_diag("FILE", p.finalUrl);
         if (queue_generic_background(p)) return true;
-        // If the persistent daemon cannot start, give the WebKit a chance rather than crash.
-        reopenUrl = p.finalUrl;
+        reopenUrl = referer;
         return false;
     }
 
-    reopenUrl = p.finalUrl.empty() ? captured : p.finalUrl;
+    // It is a normal page/navigation. Reopen it ourselves in the same browser
+    // instead of letting WebBrowserDialog attempt popup/new-window handling.
+    append_diag("PAGE", p.finalUrl);
+    reopenUrl = p.finalUrl.empty() ? resolved : p.finalUrl;
     return false;
 }
 
@@ -821,21 +1069,18 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
      */
     static const char* homeUrl = "https://www.google.com/?hl=pt-BR";
     const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : homeUrl;
-    static const char* callbackRegexDefault =
-        "^(https?://www\\.superpsx\\.com/(ps4-fake-pkgs-game-list/?.*|.*-ps4-fpkg/?.*)|"
-        "https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
-        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*)$";
-    static const char* callbackRegexDownloads =
-        "^(https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
-        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*)$";
+    const bool hasRequestedUrl = requestedUrl && *requestedUrl;
+    const std::string startUrlString = startUrl;
 
-    const bool openingSuperPsxInternal =
-        requestedUrl && std::strstr(requestedUrl, "superpsx.com/") != nullptr;
+    // Universal navigation interceptor. Negative look-ahead excludes the page
+    // currently being opened so the initial navigation does not immediately
+    // return as a callback.
+    const std::string callbackRegex = make_navigation_regex(startUrlString);
 
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
     cb.type = CALLBACK_TYPE_REGEXP;
-    cb.data = openingSuperPsxInternal ? callbackRegexDownloads : callbackRegexDefault;
+    cb.data = callbackRegex.c_str();
 
     BrowserParam p{};
     p.baseParam.size = sizeof(CommonDialogBaseParam);
@@ -855,7 +1100,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
         return false;
     }
 
-    g_status = "WebKit v5: downloads interceptados; PKG=BGFT, arquivos=daemon.";
+    g_status = "WebKit v5.1: toda navegacao passa pelo interceptor.";
 
     bool finished = false;
     for (;;) {
@@ -896,12 +1141,6 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     // IMPORTANT: do not call sceWebBrowserDialogClose() after FINISHED/GetResult.
 
     if (!captured.empty()) {
-        if (!openingSuperPsxInternal &&
-            captured.find("https://www.superpsx.com/") == 0) {
-            g_status = "Abrindo pagina SuperPSX na mesma janela...";
-            return open_browser_and_wait(captured.c_str());
-        }
-
         std::string reopen;
         if (handle_captured_url(captured, startUrl, reopen)) {
             // Download is now owned by BGFT or the persistent daemon.
@@ -912,7 +1151,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
             return open_browser_and_wait(reopen.c_str());
     }
 
-    g_status = "Navegador fechado - v5";
+    g_status = "Navegador fechado - v5.1";
     return true;
 }
 
@@ -923,6 +1162,8 @@ int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
+    mkdir("/data/PBDL", 0777);
+    append_diag("BOOT", "PS4 Browser v5.1 universal navigation interceptor");
     (void)start_download_daemon();
 
     // Keep the same DEFAULT WebKit path proven on hardware.
