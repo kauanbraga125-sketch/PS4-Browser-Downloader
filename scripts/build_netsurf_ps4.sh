@@ -249,7 +249,7 @@ override NETSURF_USE_HARU_PDF := NO
 override NETSURF_FS_BACKING_STORE := NO
 override NETSURF_FB_FONTLIB := internal
 override NETSURF_HOMEPAGE := "https://example.com/"
-NETSURF_FB_RESPATH := /app0/res
+NETSURF_FB_RESPATH := /app0/assets/misc
 NETSURF_FB_FONTPATH := /app0/res
 EOF
 
