@@ -171,6 +171,20 @@ static int32_t load_system_module(const char* name) {
     return h;
 }
 
+
+static void clean_exit_to_shell() {
+    const int32_t h = load_system_module("libSceSystemService.sprx");
+    if (h >= 0) {
+        using LoadExecFn = int32_t (*)(const char*, const char**);
+        LoadExecFn loadExec = nullptr;
+        if (sceKernelDlsym(h, "sceSystemServiceLoadExec", (void**)&loadExec) >= 0 && loadExec) {
+            loadExec("exit", nullptr);
+            for (;;) usleep(1000 * 1000);
+        }
+    }
+    _Exit(0);
+}
+
 static bool init_browser() {
     if (g_browser.module >= 0) return true;
 
@@ -379,7 +393,7 @@ static bool looks_like_pkg(std::string u) {
     return u.size() >= 4 && u.substr(u.size() - 4) == ".pkg";
 }
 
-static bool open_browser_and_wait() {
+static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     if (!init_browser()) return false;
 
     int32_t user = 0;
@@ -394,8 +408,9 @@ static bool open_browser_and_wait() {
      * rectangle).  Custom mode is only a fallback for firmwares where default
      * presentation is unavailable to homebrew.
      */
-    static const char* startUrl = "https://www.google.com/?hl=pt-BR";
-    static const char* callbackRegex = "https?://.*\\.pkg([?#].*)?$";
+    static const char* homeUrl = "https://www.google.com/?hl=pt-BR";
+    const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : homeUrl;
+    static const char* callbackRegex = "^(https://www\\.superpsx\\.com/ps4-fake-pkgs-game-list/?|https?://.*\\.pkg([?#].*)?)$";
 
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
@@ -489,9 +504,15 @@ static bool open_browser_and_wait() {
 
     // IMPORTANT: do not call sceWebBrowserDialogClose() after FINISHED/GetResult.
 
-    if (!captured.empty() && looks_like_pkg(captured)) {
-        g_status = "Link PKG capturado. Preparando download em segundo plano...";
-        return queue_bgft(captured);
+    if (!captured.empty()) {
+        if (captured.find("https://www.superpsx.com/ps4-fake-pkgs-game-list") == 0) {
+            g_status = "Abrindo lista PS4 do SuperPSX diretamente...";
+            return open_browser_and_wait(captured.c_str());
+        }
+        if (looks_like_pkg(captured)) {
+            g_status = "Link PKG capturado. Preparando download em segundo plano...";
+            return queue_bgft(captured);
+        }
     }
 
     g_status = "Navegador fechado";
@@ -503,19 +524,13 @@ static bool open_browser_and_wait() {
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-
-    // No SDL menu, no external controller loop: go straight to the PS4 WebKit.
     sceUserServiceInitialize(nullptr);
-    const bool ok = open_browser_and_wait();
 
-    // Always tear down in a fixed order; Circle/back is owned by WebBrowserDialog.
-    if (g_browser.terminate) g_browser.terminate();
-    if (g_bgftInit) sceBgftServiceIntTerm();
-    if (g_bgftHeap) std::free(g_bgftHeap);
-    if (g_httpInit) {
-        sceHttpTerm(g_http);
-        sceSslTerm();
-        sceNetPoolDestroy(g_netPool);
-    }
-    return ok ? 0 : 1;
+    // Keep the same DEFAULT WebKit path proven on hardware.
+    (void)open_browser_and_wait();
+
+    // Do not manually tear down browser/network modules here.
+    // Stable PS4 homebrew hands control back through SystemService.
+    clean_exit_to_shell();
+    return 0;
 }
