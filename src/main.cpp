@@ -7,11 +7,12 @@
 
 #include <orbis/Pigletv2VSH.h>
 #include <orbis/Pad.h>
-#include <orbis/SysUtil.h>
 #include <orbis/Sysmodule.h>
 #include <orbis/SystemService.h>
 #include <orbis/UserService.h>
 #include <orbis/libkernel.h>
+
+extern "C" void sceSysUtilSendSystemNotificationWithText(int32_t type, const char* message);
 
 namespace {
 
