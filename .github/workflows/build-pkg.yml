@@ -1,8 +1,8 @@
-name: Build PS4 Hybrid Browser v7.5 Fluid UI
+name: Build PS4 Hybrid Browser v7.6 GPU Screencast
 
 on:
   push:
-    branches: [ hybrid-v7-5-fluid-ui ]
+    branches: [ hybrid-v7-6-gpu-screencast ]
   workflow_dispatch:
 
 permissions:
@@ -89,8 +89,8 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_5_FluidUI.pkg
-          sha256sum PS4_Hybrid_Browser_v7_5_FluidUI.pkg > PS4_Hybrid_Browser_v7_5_FluidUI.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_6_GPU.pkg
+          sha256sum PS4_Hybrid_Browser_v7_6_GPU.pkg > PS4_Hybrid_Browser_v7_6_GPU.pkg.sha256
 
       - name: Validate hybrid backend
         run: |
@@ -103,22 +103,23 @@ jobs:
           grep -q 'app.get("/api/focus-info"' backend/server.js
           grep -q 'app.post("/api/type-submit"' backend/server.js
           grep -q 'app.get("/shot-fast"' backend/server.js
+          grep -q 'Page.startScreencast' backend/server.js
           grep -q 'app.post("/api/home"' backend/server.js
           grep -q 'input type=\\\"image\\\"' backend/server.js
 
       - name: Package hybrid backend
         run: |
           set -euxo pipefail
-          python3 -m zipfile -c PS4_Hybrid_Browser_Backend_v7_5.zip backend
-          test -s PS4_Hybrid_Browser_Backend_v7_5.zip
+          python3 -m zipfile -c PS4_Hybrid_Browser_Backend_v7_6.zip backend
+          test -s PS4_Hybrid_Browser_Backend_v7_6.zip
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Hybrid-Browser-v7-5-FluidUI
+          name: PS4-Hybrid-Browser-v7-6-GPU
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Hybrid_Browser_v7_5_FluidUI.pkg
-            PS4_Hybrid_Browser_v7_5_FluidUI.pkg.sha256
-            PS4_Hybrid_Browser_Backend_v7_5.zip
+            PS4_Hybrid_Browser_v7_6_GPU.pkg
+            PS4_Hybrid_Browser_v7_6_GPU.pkg.sha256
+            PS4_Hybrid_Browser_Backend_v7_6.zip

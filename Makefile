@@ -1,5 +1,5 @@
-TITLE       := PS4 Hybrid Browser v7.5
-VERSION     := 07.50
+TITLE       := PS4 Hybrid Browser v7.6 GPU
+VERSION     := 07.60
 TITLE_ID    := PBDL00001
 CONTENT_ID  := IV0000-PBDL00001_00-PS4BROWSERDL0001
 
@@ -13,7 +13,8 @@ LD          := ld.lld
 
 LIBS := -lc -lkernel -lc++ -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp \
         -lSceAppInstUtil -lSceBgft -lSceVideoOut -lSceAudioOut -lScePad \
-        -lSceImeDialog -lSceCommonDialog -lSDL2
+        -lSceImeDialog -lSceCommonDialog -lSDL2 -lScePigletv2VSH \
+        -lScePrecompiledShaders -lSceSystemService
 CFLAGS   := --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -DORBIS -D_GNU_SOURCE \
             -isysroot $(TOOLCHAIN) -isystem $(TOOLCHAIN)/include
 CXXFLAGS := $(CFLAGS) -std=c++11 -fexceptions -fcxx-exceptions -isystem $(TOOLCHAIN)/include/c++/v1
@@ -26,6 +27,8 @@ MODULE_DATA := $(TOOLCHAIN)/src/modules
 PACKAGE_FILES := eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png \
                  sce_module/libSceFios2.prx sce_module/libc.prx daemon.elf
 
+AUTHINFO := "000000000000000000000000001C004000FF000000000080000000000000000000000000000000000000008000400040000000000000008000000000000000080040FFFF000000F000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+
 .PHONY: all clean
 all: $(CONTENT_ID).pkg
 
@@ -37,7 +40,7 @@ $(INTDIR)/%.o: $(PROJDIR)/%.cpp | $(INTDIR)
 
 eboot.bin: $(OBJS)
 	$(LD) $(OBJS) -o $(INTDIR)/app.elf $(LDFLAGS)
-	$(TOOLCHAIN)/bin/$(CDIR)/create-fself -in=$(INTDIR)/app.elf -out=$(INTDIR)/app.oelf --eboot eboot.bin --paid 0x3800000000000011
+	$(TOOLCHAIN)/bin/$(CDIR)/create-fself -in=$(INTDIR)/app.elf -out=$(INTDIR)/app.oelf --eboot eboot.bin --paid 0x3800000000000035 --authinfo $(AUTHINFO)
 
 sce_sys/about/right.sprx:
 	mkdir -p sce_sys/about

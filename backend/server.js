@@ -15,6 +15,10 @@ const VIEWPORT = { width: 1280, height: 720 };
 let browser = null;
 let context = null;
 let page = null;
+let cdpSession = null;
+let latestFrame = null;
+let latestFrameSeq = 0;
+let latestFrameAt = 0;
 let lastDownload = null;
 let lastMessage = "Inicializando Chromium...";
 const downloads = new Map();
@@ -114,6 +118,37 @@ function getLanIp() {
   return "127.0.0.1";
 }
 
+async function startCdpScreencast(p) {
+  try {
+    if (cdpSession) {
+      try { await cdpSession.detach(); } catch (_) {}
+      cdpSession = null;
+    }
+    cdpSession = await context.newCDPSession(p);
+    cdpSession.on("Page.screencastFrame", async function(evt) {
+      latestFrame = Buffer.from(evt.data, "base64");
+      latestFrameSeq++;
+      latestFrameAt = Date.now();
+      try {
+        await cdpSession.send("Page.screencastFrameAck", {
+          sessionId: evt.sessionId
+        });
+      } catch (_) {}
+    });
+    await cdpSession.send("Page.startScreencast", {
+      format: "jpeg",
+      quality: 42,
+      maxWidth: VIEWPORT.width,
+      maxHeight: VIEWPORT.height,
+      everyNthFrame: 1
+    });
+    console.log("[Hybrid] CDP screencast ativo");
+  } catch (e) {
+    cdpSession = null;
+    console.error("[Hybrid] CDP screencast indisponivel:", String(e.message || e));
+  }
+}
+
 async function ensurePage() {
   if (page && !page.isClosed()) return page;
 
@@ -160,6 +195,8 @@ async function ensurePage() {
       }
     } catch (_) {}
   });
+
+  await startCdpScreencast(page);
 
   try {
     await page.goto("https://www.google.com/", { waitUntil: "domcontentloaded", timeout: 35000 });
@@ -270,7 +307,7 @@ app.get("/ps4", function(req, res) {
   });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.5.0" });
+  res.json({ ok: true, version: "7.6.0" });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -285,142 +322,24 @@ app.get("/shot", async function(_req, res) {
 
 app.get("/shot-fast", async function(_req, res) {
   try {
-    const p = await ensurePage();
-    const jpg = await p.screenshot({
-      type: "jpeg",
-      quality: 45,
-      animations: "disabled"
-    });
+    await ensurePage();
+    let jpg = latestFrame;
+    if (!jpg) {
+      jpg = await page.screenshot({
+        type: "jpeg",
+        quality: 42
+      });
+      latestFrame = jpg;
+      latestFrameSeq++;
+      latestFrameAt = Date.now();
+    }
     res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set("X-Frame-Seq", String(latestFrameSeq));
+    res.set("X-Frame-Age", String(Date.now() - latestFrameAt));
     res.type("jpeg").send(jpg);
   } catch (e) {
-    // Recreate the page on the next request if Chromium/page died.
-    try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
-    page = null;
     res.status(500).send(String(e.message || e));
   }
-});
-
-function backToUi(res, mode) {
-  res.redirect(303, "/ps4?mode=" + (mode === "image" ? "image" : "click"));
-}
-
-app.post("/legacy/nav", async function(req, res) {
-  await navigate(req.body && req.body.url);
-  backToUi(res, "click");
-});
-app.post("/legacy/back", async function(_req, res) {
-  const p = await ensurePage();
-  try { await p.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
-  backToUi(res, "click");
-});
-app.post("/legacy/forward", async function(_req, res) {
-  const p = await ensurePage();
-  try { await p.goForward({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
-  backToUi(res, "click");
-});
-app.post("/legacy/reload", async function(_req, res) {
-  const p = await ensurePage();
-  try { await p.reload({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
-  backToUi(res, "click");
-});
-app.post("/legacy/scroll-up", async function(_req, res) {
-  const p = await ensurePage();
-  try { await p.mouse.wheel(0, -550); } catch (_) {}
-  backToUi(res, "click");
-});
-app.post("/legacy/scroll-down", async function(_req, res) {
-  const p = await ensurePage();
-  try { await p.mouse.wheel(0, 550); } catch (_) {}
-  backToUi(res, "click");
-});
-app.post("/legacy/type", async function(req, res) {
-  const p = await ensurePage();
-  try { await p.keyboard.insertText(String((req.body && req.body.text) || "")); } catch (_) {}
-  backToUi(res, "click");
-});
-function imageInputCoords(body) {
-  const x = Number(body["shot.x"] != null ? body["shot.x"] : body.shot_x || 0);
-  const y = Number(body["shot.y"] != null ? body["shot.y"] : body.shot_y || 0);
-  return {
-    x: Math.max(0, Math.min(1279, x)),
-    y: Math.max(0, Math.min(719, y))
-  };
-}
-app.post("/legacy/click", async function(req, res) {
-  const p = await ensurePage();
-  const pos = imageInputCoords(req.body || {});
-  try { await p.mouse.click(pos.x, pos.y); } catch (_) {}
-  await new Promise(function(resolve){ setTimeout(resolve, 250); });
-  backToUi(res, "click");
-});
-app.post("/legacy/image-at", async function(req, res) {
-  const p = await ensurePage();
-  const pos = imageInputCoords(req.body || {});
-  try {
-    const info = await p.evaluate(function(pt) {
-      var el = document.elementFromPoint(pt.x, pt.y);
-      for (var i = 0; el && i < 6; i++, el = el.parentElement) {
-        if (el.tagName === "IMG")
-          return { url: el.currentSrc || el.src, name: el.alt || "" };
-        var bg = getComputedStyle(el).backgroundImage || "";
-        var m = bg.match(/^url\(["']?(.*?)["']?\)$/);
-        if (m) return { url: m[1], name: "" };
-      }
-      return null;
-    }, pos);
-    if (!info || !info.url) {
-      lastMessage = "Nenhuma imagem encontrada nesse ponto.";
-    } else {
-      var name = guessName(info.url, "image.jpg");
-      if (info.name && name.indexOf(".") < 0) name = safeName(info.name) + ".jpg";
-      registerRemote(info.url, name, recentRequests.get(info.url) || null, "image/*");
-      lastMessage = "Imagem pronta para enviar ao PS4: " + name;
-    }
-  } catch (e) {
-    lastMessage = "Falha ao identificar imagem: " + String(e.message || e);
-  }
-  backToUi(res, "image");
-});
-
-
-app.get("/api/pending-download", function(_req, res) {
-  if (!lastDownload || lastDownload.preparing || !lastDownload.handoff)
-    return res.status(204).end();
-  res.set("Cache-Control", "no-store");
-  res.type("text").send(lastDownload.handoff);
-});
-app.post("/api/ack-download", function(_req, res) {
-  lastDownload = null;
-  res.json({ ok: true });
-});
-
-
-app.get("/api/focus-info", async function(_req, res) {
-  const p = await ensurePage();
-  let editable = false;
-  try {
-    editable = await p.evaluate(function() {
-      var el = document.activeElement;
-      if (!el) return false;
-      var tag = String(el.tagName || "").toLowerCase();
-      var type = String(el.type || "").toLowerCase();
-      if (tag === "textarea") return true;
-      if (el.isContentEditable) return true;
-      if (tag !== "input") return false;
-      return ["button","submit","reset","checkbox","radio","file","image","hidden"].indexOf(type) < 0;
-    });
-  } catch (_) {}
-  res.type("text").send(editable ? "1" : "0");
-});
-
-app.post("/api/type-submit", async function(req, res) {
-  const p = await ensurePage();
-  try {
-    await p.keyboard.insertText(String((req.body && req.body.text) || ""));
-    await p.keyboard.press("Enter");
-  } catch (_) {}
-  res.json({ ok: true });
 });
 
 app.get("/api/state", async function(_req, res) {
