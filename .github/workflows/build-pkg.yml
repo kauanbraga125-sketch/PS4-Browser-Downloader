@@ -64,6 +64,7 @@ jobs:
           cp "$DAEMON_SRC" daemon/daemon.elf
           test -s daemon/daemon.elf
           sha256sum daemon/daemon.elf
+          sudo rm -rf ezremote_extract ezremote_client.pkg
 
       - name: Compile eboot
         run: |
@@ -75,7 +76,8 @@ jobs:
       - name: Package PKG
         run: |
           set -euxo pipefail
-          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          chmod -R a+rwX build daemon sce_sys sce_module 2>/dev/null || true
+          chmod a+rw eboot.bin Makefile 2>/dev/null || true
           docker run --rm --user 0:0 \
             --env OO_PS4_TOOLCHAIN=/opt/openorbis \
             --volume "$GITHUB_WORKSPACE:/work" \
