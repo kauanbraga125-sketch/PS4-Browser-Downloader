@@ -17,7 +17,7 @@ MODULE_DATA="$OO_PS4_TOOLCHAIN/src/modules"
 
 test -s "$ELF"
 rm -rf "$OUTDIR"
-mkdir -p "$PKGROOT/sce_sys/about" "$PKGROOT/sce_module" "$PKGROOT/res"
+mkdir -p "$PKGROOT/sce_sys/about" "$PKGROOT/sce_module" "$PKGROOT/assets/misc"
 
 echo "==> create eboot.bin from independent NetSurf ELF"
 "$TOOLBIN/create-fself"   -in="$ELF"   -out="$OUTDIR/netsurf-ps4.oelf"   --eboot "$PKGROOT/eboot.bin"   --paid 0x3800000000000011
@@ -43,7 +43,7 @@ SFO="$PKGROOT/sce_sys/param.sfo"
 "$TOOLBIN/PkgTool.Core" sfo_setentry "$SFO" TITLE_ID --type Utf8 --maxsize 12 --value "$TITLE_ID"
 "$TOOLBIN/PkgTool.Core" sfo_setentry "$SFO" VERSION --type Utf8 --maxsize 8 --value "$VERSION"
 
-# NetSurf was compiled with NETSURF_FB_RESPATH=/app0/res.
+# NetSurf was compiled with NETSURF_FB_RESPATH=/app0/assets/misc.
 # Do NOT package the whole source resource tree. Icons, throbber images,
 # pointers and the internal font were converted into C objects at build time.
 # Upstream's framebuffer install target only installs these runtime resources.
@@ -60,7 +60,7 @@ runtime_resources=(
 )
 for resource in "${runtime_resources[@]}"; do
   test -f "$ROOT/build/independent/res/$resource"
-  cp "$ROOT/build/independent/res/$resource" "$PKGROOT/res/$resource"
+  cp "$ROOT/build/independent/res/$resource" "$PKGROOT/assets/misc/$resource"
 done
 
 cd "$PKGROOT"
