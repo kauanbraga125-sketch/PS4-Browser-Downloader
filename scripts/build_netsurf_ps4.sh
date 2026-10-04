@@ -39,6 +39,7 @@ fetch_repo netsurf-browser/libdom f69781e1f062444b5af3f62d431d7d94018da53b libdo
 fetch_repo netsurf-browser/libnsutils 0bd39060740b6163bd50875326654a722df97eb2 libnsutils
 fetch_repo netsurf-browser/libnsfb b701cdce7241c3747ccd78658a365db0983ebe24 libnsfb
 fetch_repo madler/zlib refs/tags/v1.3.1 zlib
+fetch_repo netsurf-browser/nsgenbind 44c6736937ae17d4065d02959b82813b8f06a51e nsgenbind
 fetch_repo netsurf-browser/netsurf 39da3c3a40af4566d86500ff3052dfdc7f9a0378 netsurf
 
 cat > "$TOOLS/ps4-pkg-config" <<EOF
@@ -126,6 +127,20 @@ build_lib() {
 
     env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$COMMON_LDFLAGS" make -j2 install "${makeargs[@]}"
 }
+
+# nsgenbind is a build-time executable. It must run on the Linux CI host,
+# while the generated bindings are then compiled for PS4.
+echo
+echo "================ host nsgenbind ================"
+HOSTTOOLS="$WORK/host-tools"
+mkdir -p "$HOSTTOOLS"
+(
+    cd "$SRC/nsgenbind"
+    sed -i 's/-Werror//g' Makefile || true
+    make -j2 install         "PREFIX=$HOSTTOOLS"         "NSSHARED=$NSBUILD"         "NSBUILD=$NSBUILD"         "CC=cc"         "BUILD_CC=cc"         "AR=ar"         "FLEX=flex"         "BISON=bison"         Q= VQ=
+)
+test -x "$HOSTTOOLS/bin/nsgenbind"
+export PATH="$HOSTTOOLS/bin:$PATH"
 
 build_zlib
 
@@ -355,6 +370,8 @@ s = s.replace(
     "#ifdef ORBIS\n"
     "\t/* Re-enable real site CSS and common raster images. */\n"
     "\tnsoption_set_bool(author_level_css, true);\n"
+    "\tnsoption_set_bool(enable_javascript, true);\n"
+    "\tnsoption_set_int(script_timeout, 8);\n"
     "\tnsoption_set_bool(foreground_images, true);\n"
     "\tnsoption_set_bool(background_images, true);\n"
     "\tnsoption_set_bool(animate_images, false);\n"
@@ -804,7 +821,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = "about:welcome";
+	feurl = "https://www.google.com/";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
@@ -1352,7 +1369,7 @@ PY
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
-override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_DUKTAPE := YES
 override NETSURF_USE_BMP := NO
 override NETSURF_USE_GIF := NO
 override NETSURF_USE_JPEG := NO
