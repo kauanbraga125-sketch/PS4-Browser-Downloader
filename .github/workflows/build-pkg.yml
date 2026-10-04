@@ -1,8 +1,8 @@
-name: Build PS4 Hybrid Browser v7.3 Native Client
+name: Build PS4 Hybrid Browser v7.3.2 Fast Cursor
 
 on:
   push:
-    branches: [ hybrid-v7-3-native-client ]
+    branches: [ hybrid-v7-3-2-fast-cursor ]
   workflow_dispatch:
 
 permissions:
@@ -89,8 +89,8 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_3_Native.pkg
-          sha256sum PS4_Hybrid_Browser_v7_3_Native.pkg > PS4_Hybrid_Browser_v7_3_Native.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Hybrid_Browser_v7_3_2_FastCursor.pkg
+          sha256sum PS4_Hybrid_Browser_v7_3_2_FastCursor.pkg > PS4_Hybrid_Browser_v7_3_2_FastCursor.pkg.sha256
 
       - name: Validate hybrid backend
         run: |
@@ -111,10 +111,10 @@ jobs:
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Hybrid-Browser-v7-3-Native
+          name: PS4-Hybrid-Browser-v7-3-2-FastCursor
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Hybrid_Browser_v7_3_Native.pkg
-            PS4_Hybrid_Browser_v7_3_Native.pkg.sha256
+            PS4_Hybrid_Browser_v7_3_2_FastCursor.pkg
+            PS4_Hybrid_Browser_v7_3_2_FastCursor.pkg.sha256
             PS4_Hybrid_Browser_Backend_v7_3.zip

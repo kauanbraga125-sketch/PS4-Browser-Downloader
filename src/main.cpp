@@ -273,7 +273,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1322,7 +1322,7 @@ static bool http_get_bytes_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1409,7 +1409,7 @@ static bool http_post_json_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.3", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.3.2", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1603,6 +1603,26 @@ static bool process_pending_download(const std::string& backend) {
     return ok;
 }
 
+static int cursor_axis_step(uint8_t raw) {
+    const int centered = static_cast<int>(raw) - 128;
+    const int magnitude = std::abs(centered);
+
+    // Small deadzone for quick response without cursor drift.
+    const int deadzone = 10;
+    if (magnitude <= deadzone) return 0;
+
+    const int active = magnitude - deadzone; // 1..117
+
+    // Progressive curve:
+    // tiny tilt -> pixel-precise movement
+    // medium tilt -> clearly faster
+    // full tilt -> fast traversal across the 1920px screen
+    int step = 1 + active / 5 + (active * active) / 700;
+    if (step > 44) step = 44;
+
+    return centered < 0 ? -step : step;
+}
+
 static int open_native_pad() {
     scePadInit();
     sceUserServiceInitialize(nullptr);
@@ -1618,7 +1638,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.3 native client");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.3.2 fast cursor");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -1715,13 +1735,11 @@ int main() {
             const uint32_t pressed = pd.buttons & ~oldButtons;
             oldButtons = pd.buttons;
 
-            int dx = static_cast<int>(pd.leftStick.x) - 128;
-            int dy = static_cast<int>(pd.leftStick.y) - 128;
-            if (std::abs(dx) < 18) dx = 0;
-            if (std::abs(dy) < 18) dy = 0;
-            if (dx || dy) {
-                cursorX += dx / 14;
-                cursorY += dy / 14;
+            const int moveX = cursor_axis_step(pd.leftStick.x);
+            const int moveY = cursor_axis_step(pd.leftStick.y);
+            if (moveX || moveY) {
+                cursorX += moveX;
+                cursorY += moveY;
                 cursorX = std::max(0, std::min(SCREEN_W - 1, cursorX));
                 cursorY = std::max(0, std::min(SCREEN_H - 1, cursorY));
                 redraw = true;
