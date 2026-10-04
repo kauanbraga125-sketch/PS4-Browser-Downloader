@@ -265,7 +265,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.1", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.2", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1100,16 +1100,24 @@ static bool backend_healthy(std::string base) {
     return p.ok && p.status >= 200 && p.status < 300;
 }
 
+static bool backend_ui_healthy(std::string base) {
+    if (base.empty()) return false;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    UrlProbe p = probe_url(base + "/ps4");
+    return p.ok && p.status >= 200 && p.status < 300;
+}
+
+
 static std::string discover_hybrid_backend() {
     if (!init_network()) {
         const std::string cached = read_small_file("/data/PBDL/backend.txt");
-        return backend_healthy(cached) ? cached : "";
+        return backend_healthy(cached) && backend_ui_healthy(cached) ? cached : "";
     }
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) {
         const std::string cached = read_small_file("/data/PBDL/backend.txt");
-        return backend_healthy(cached) ? cached : "";
+        return backend_healthy(cached) && backend_ui_healthy(cached) ? cached : "";
     }
 
     int one = 1;
@@ -1156,7 +1164,7 @@ static std::string discover_hybrid_backend() {
                     found = trim_copy(msg.substr(prefix.size()));
             }
 
-            if (!found.empty() && !backend_healthy(found)) {
+            if (!found.empty() && !backend_healthy(found) && backend_ui_healthy(found)) {
                 append_diag("HYBRID_HEALTH_FAIL", found);
                 found.clear();
             }
@@ -1173,7 +1181,7 @@ static std::string discover_hybrid_backend() {
     }
 
     const std::string cached = read_small_file("/data/PBDL/backend.txt");
-    if (!cached.empty() && backend_healthy(cached)) {
+    if (!cached.empty() && backend_healthy(cached) && backend_ui_healthy(cached)) {
         append_diag("HYBRID_BACKEND_CACHE", cached);
         return cached;
     }
@@ -1249,7 +1257,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
         p.url = startUrl.c_str();
         p.callbackInitParam = &cb;
 
-        g_status = "Hybrid v7.1: abrindo interface...";
+        g_status = "Hybrid v7.2: abrindo interface simples...";
         int32_t r = g_browser.open(&p);
         if (r != 0) {
             g_status = "Hybrid browser open: " + hex32(r);
@@ -1305,7 +1313,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.1 audited");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.2 legacy UI");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -1321,9 +1329,11 @@ int main() {
         clean_exit_to_shell();
     }
 
-    if (backend.back() != '/') backend.push_back('/');
-    append_diag("HYBRID_OPEN", backend);
-    (void)open_browser_and_wait(backend.c_str());
+    while (!backend.empty() && backend.back() == '/') backend.pop_back();
+    const std::string uiUrl = backend + "/ps4";
+    append_diag("HYBRID_OPEN", uiUrl);
+    notify_user("Hybrid v7.2: backend encontrado. Abrindo interface simples.");
+    (void)open_browser_and_wait(uiUrl.c_str());
 
     clean_exit_to_shell();
     return 0;

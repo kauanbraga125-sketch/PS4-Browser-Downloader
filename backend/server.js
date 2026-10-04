@@ -191,12 +191,86 @@ const app = express();
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
-app.get("/", async function(_req, res) {
-  await ensurePage();
-  res.sendFile(path.join(__dirname, "index.html"));
+
+function escHtml(v) {
+  return String(v == null ? "" : v)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+async function renderLegacyPage(req, res) {
+  const p = await ensurePage();
+  let title = "";
+  try { title = await p.title(); } catch (_) {}
+  const mode = req.query && req.query.mode === "image" ? "image" : "click";
+  const shotAction = mode === "image" ? "/legacy/image-at" : "/legacy/click";
+  const shotLabel = mode === "image"
+    ? "MODO BAIXAR IMAGEM: clique na imagem desejada"
+    : "MODO NAVEGAR: clique na pagina abaixo";
+
+  let dl = "";
+  if (lastDownload) {
+    if (lastDownload.preparing) {
+      dl = "<p><b>Download:</b> Chromium baixando no PC: " +
+        escHtml(lastDownload.filename) + "</p>";
+    } else if (lastDownload.handoff) {
+      dl = "<p><b>Download pronto:</b> " + escHtml(lastDownload.filename) +
+        " &nbsp; <a href=\"" + escHtml(lastDownload.handoff) +
+        "\"><b>BAIXAR NO PS4</b></a></p>";
+    }
+  }
+
+  const html =
+    "<!DOCTYPE html><html><head>" +
+    "<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\">" +
+    "<title>PS4 Hybrid Browser</title></head>" +
+    "<body bgcolor=\"#FFFFFF\" text=\"#000000\" link=\"#0000CC\" vlink=\"#660099\">" +
+    "<h2>PS4 Hybrid Browser v7.2</h2>" +
+    "<table border=\"0\" cellpadding=\"4\" cellspacing=\"0\" width=\"100%\"><tr>" +
+    "<td><form method=\"post\" action=\"/legacy/back\"><input type=\"submit\" value=\"&lt;- Voltar\"></form></td>" +
+    "<td><form method=\"post\" action=\"/legacy/forward\"><input type=\"submit\" value=\"Avancar -&gt;\"></form></td>" +
+    "<td><form method=\"post\" action=\"/legacy/reload\"><input type=\"submit\" value=\"Recarregar\"></form></td>" +
+    "<td><form method=\"post\" action=\"/legacy/scroll-up\"><input type=\"submit\" value=\"Subir\"></form></td>" +
+    "<td><form method=\"post\" action=\"/legacy/scroll-down\"><input type=\"submit\" value=\"Descer\"></form></td>" +
+    "<td><form method=\"get\" action=\"/ps4\"><input type=\"hidden\" name=\"mode\" value=\"" +
+      (mode === "image" ? "click" : "image") + "\"><input type=\"submit\" value=\"" +
+      (mode === "image" ? "Voltar ao modo navegar" : "Baixar imagem") + "\"></form></td>" +
+    "</tr></table>" +
+    "<form method=\"post\" action=\"/legacy/nav\">" +
+    "<b>URL ou pesquisa:</b> <input type=\"text\" name=\"url\" size=\"70\" value=\"" +
+      escHtml(p.url()) + "\"> <input type=\"submit\" value=\"Ir\">" +
+    "</form>" +
+    "<form method=\"post\" action=\"/legacy/type\">" +
+    "<b>Texto para campo focado:</b> <input type=\"text\" name=\"text\" size=\"45\">" +
+    " <input type=\"submit\" value=\"Enviar texto\"></form>" +
+    "<p><b>Titulo:</b> " + escHtml(title) + "<br>" +
+    "<b>Status:</b> " + escHtml(lastMessage) + "<br>" +
+    "<b>Modo:</b> " + escHtml(shotLabel) + "</p>" +
+    dl +
+    "<p><a href=\"/ps4?mode=" + mode + "\">Atualizar tela</a></p>" +
+    "<form method=\"post\" action=\"" + shotAction + "\">" +
+    "<input type=\"hidden\" name=\"mode\" value=\"" + mode + "\">" +
+    "<input type=\"image\" name=\"shot\" src=\"/shot?t=" + Date.now() +
+      "\" width=\"1280\" height=\"720\" alt=\"Pagina Chromium\">" +
+    "</form>" +
+    "</body></html>";
+
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.type("html").send(html);
+}
+
+app.get("/", function(req, res) {
+  res.redirect(302, "/ps4");
+});
+app.get("/ps4", function(req, res) {
+  renderLegacyPage(req, res).catch(function(e) {
+    res.status(500).type("text").send("Hybrid UI error: " + String(e.message || e));
+  });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.1.0" });
+  res.json({ ok: true, version: "7.2.0" });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -208,6 +282,89 @@ app.get("/shot", async function(_req, res) {
     res.status(500).send(String(e.message || e));
   }
 });
+
+function backToUi(res, mode) {
+  res.redirect(303, "/ps4?mode=" + (mode === "image" ? "image" : "click"));
+}
+
+app.post("/legacy/nav", async function(req, res) {
+  await navigate(req.body && req.body.url);
+  backToUi(res, "click");
+});
+app.post("/legacy/back", async function(_req, res) {
+  const p = await ensurePage();
+  try { await p.goBack({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
+  backToUi(res, "click");
+});
+app.post("/legacy/forward", async function(_req, res) {
+  const p = await ensurePage();
+  try { await p.goForward({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
+  backToUi(res, "click");
+});
+app.post("/legacy/reload", async function(_req, res) {
+  const p = await ensurePage();
+  try { await p.reload({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
+  backToUi(res, "click");
+});
+app.post("/legacy/scroll-up", async function(_req, res) {
+  const p = await ensurePage();
+  try { await p.mouse.wheel(0, -550); } catch (_) {}
+  backToUi(res, "click");
+});
+app.post("/legacy/scroll-down", async function(_req, res) {
+  const p = await ensurePage();
+  try { await p.mouse.wheel(0, 550); } catch (_) {}
+  backToUi(res, "click");
+});
+app.post("/legacy/type", async function(req, res) {
+  const p = await ensurePage();
+  try { await p.keyboard.insertText(String((req.body && req.body.text) || "")); } catch (_) {}
+  backToUi(res, "click");
+});
+function imageInputCoords(body) {
+  const x = Number(body["shot.x"] != null ? body["shot.x"] : body.shot_x || 0);
+  const y = Number(body["shot.y"] != null ? body["shot.y"] : body.shot_y || 0);
+  return {
+    x: Math.max(0, Math.min(1279, x)),
+    y: Math.max(0, Math.min(719, y))
+  };
+}
+app.post("/legacy/click", async function(req, res) {
+  const p = await ensurePage();
+  const pos = imageInputCoords(req.body || {});
+  try { await p.mouse.click(pos.x, pos.y); } catch (_) {}
+  await new Promise(function(resolve){ setTimeout(resolve, 250); });
+  backToUi(res, "click");
+});
+app.post("/legacy/image-at", async function(req, res) {
+  const p = await ensurePage();
+  const pos = imageInputCoords(req.body || {});
+  try {
+    const info = await p.evaluate(function(pt) {
+      var el = document.elementFromPoint(pt.x, pt.y);
+      for (var i = 0; el && i < 6; i++, el = el.parentElement) {
+        if (el.tagName === "IMG")
+          return { url: el.currentSrc || el.src, name: el.alt || "" };
+        var bg = getComputedStyle(el).backgroundImage || "";
+        var m = bg.match(/^url\(["']?(.*?)["']?\)$/);
+        if (m) return { url: m[1], name: "" };
+      }
+      return null;
+    }, pos);
+    if (!info || !info.url) {
+      lastMessage = "Nenhuma imagem encontrada nesse ponto.";
+    } else {
+      var name = guessName(info.url, "image.jpg");
+      if (info.name && name.indexOf(".") < 0) name = safeName(info.name) + ".jpg";
+      registerRemote(info.url, name, recentRequests.get(info.url) || null, "image/*");
+      lastMessage = "Imagem pronta para enviar ao PS4: " + name;
+    }
+  } catch (e) {
+    lastMessage = "Falha ao identificar imagem: " + String(e.message || e);
+  }
+  backToUi(res, "image");
+});
+
 app.get("/api/state", async function(_req, res) {
   const p = await ensurePage();
   let title = "";
@@ -281,7 +438,7 @@ app.post("/api/image-at", async function(req, res) {
 
 app.get("/handoff/:kind/:token/:name", function(req, res) {
   if (!downloads.has(req.params.token)) return res.status(404).send("Download expirado.");
-  res.type("html").send("<h1>Download capturado pelo PS4.</h1>");
+  res.type("html").send("<html><body bgcolor=\"#FFFFFF\" text=\"#000000\"><h1>Download capturado.</h1><p>Se esta pagina apareceu, o callback do PKG nao interceptou o handoff.</p></body></html>");
 });
 
 app.get("/file/:kind/:token/:name", async function(req, res) {

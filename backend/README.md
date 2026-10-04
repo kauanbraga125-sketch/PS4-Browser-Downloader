@@ -24,3 +24,13 @@ Não exponha a porta 32124 diretamente à Internet sem autenticação.
 - Downloads iniciados por sites sao concluidos no Chromium antes do handoff. Isso evita perder URLs temporarias/de uso unico.
 - Para arquivos comuns em background, GoldHEN BinLoader precisa estar ativo na porta 9090.
 - Para PKG, o cliente detecta o magic real do pacote e usa BGFT mesmo sem extensao .pkg.
+
+
+## v7.2 - interface compatível com WebKit antigo
+
+A interface do PS4 agora é HTML simples gerado no servidor, sem depender de XHR, fetch,
+setInterval ou CSS moderno. O Chromium continua no PC; o PS4 apenas exibe formulários
+básicos e uma captura PNG clicável.
+
+Se a interface abrir corretamente você verá fundo branco, título "PS4 Hybrid Browser v7.2",
+barra de URL, botões e a imagem da página Chromium.
