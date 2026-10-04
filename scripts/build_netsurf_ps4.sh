@@ -146,9 +146,10 @@ build_lib libnsutils
 # with the PS4 SDL2 implementation; keep the RAM surface for offscreen bitmaps.
 cp "$ROOT/ports/libnsfb/ps4_sdl2.c" "$SRC/libnsfb/src/surface/ps4_sdl2.c"
 
-python3 - <<'PY'
+python3 - "$SRC/libnsfb/src/surface.h" <<'PY'
 from pathlib import Path
-p = Path("$SRC/libnsfb/src/surface.h")
+import sys
+p = Path(sys.argv[1])
 s = p.read_text()
 s = s.replace(
     "    static void __name##_register_surface(void) __attribute__((constructor)); \\\n"
