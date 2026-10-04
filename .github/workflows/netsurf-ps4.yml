@@ -3,10 +3,6 @@ name: Build Independent NetSurf PS4
 on:
   push:
     branches: [ independent-engine-poc ]
-    paths:
-      - 'scripts/build_netsurf_ps4.sh'
-      - 'ports/**'
-      - '.github/workflows/netsurf-ps4.yml'
   workflow_dispatch:
 
 permissions:
