@@ -89,4 +89,4 @@ jobs:
           fetch_archive netsurf-browser/libwapcaplet c7c128d3eb3223b216c974471f82e9337fbcf4ba libwapcaplet
           fetch_archive netsurf-browser/libnsutils 0bd39060740b6163bd50875326654a722df97eb2 libnsutils
           fetch_archive netsurf-browser/libnslog bedff2146270a8a73cc265bab46ec39f9c170d07 libnslog
-          clang --target=x86_64-pc-freebsd12-elf -fPIC -fsyntax-only -DORBIS -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L             -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include"             -Iports/compat -I/tmp/netsurf -I/tmp/libwapcaplet/include -I/tmp/libnsutils/include -I/tmp/libnslog/include             ports/netsurf/fetch_ps4.c
+          clang --target=x86_64-pc-freebsd12-elf -fPIC -fsyntax-only -DORBIS -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L             -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include"             -Iports/compat -I/tmp/netsurf -I/tmp/netsurf/include -I/tmp/libwapcaplet/include -I/tmp/libnsutils/include -I/tmp/libnslog/include             ports/netsurf/fetch_ps4.c
