@@ -179,6 +179,18 @@ static int32_t load_system_module(const char* name) {
 }
 
 
+static void notify_user(const std::string& message) {
+    const int32_t h = load_system_module("libSceSysUtil.sprx");
+    if (h < 0) return;
+    using NotifyFn = void (*)(int32_t, const char*);
+    NotifyFn fn = nullptr;
+    if (sceKernelDlsym(h, "sceSysUtilSendSystemNotificationWithText",
+                       reinterpret_cast<void**>(&fn)) >= 0 && fn) {
+        fn(222, message.c_str());
+    }
+}
+
+
 static void clean_exit_to_shell() {
     const int32_t h = load_system_module("libSceSystemService.sprx");
     if (h >= 0) {
@@ -253,7 +265,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.0", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1080,11 +1092,25 @@ static void write_small_file(const char* path, const std::string& value) {
     close(fd);
 }
 
+
+static bool backend_healthy(std::string base) {
+    if (base.empty()) return false;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    UrlProbe p = probe_url(base + "/health");
+    return p.ok && p.status >= 200 && p.status < 300;
+}
+
 static std::string discover_hybrid_backend() {
-    if (!init_network()) return read_small_file("/data/PBDL/backend.txt");
+    if (!init_network()) {
+        const std::string cached = read_small_file("/data/PBDL/backend.txt");
+        return backend_healthy(cached) ? cached : "";
+    }
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) return read_small_file("/data/PBDL/backend.txt");
+    if (fd < 0) {
+        const std::string cached = read_small_file("/data/PBDL/backend.txt");
+        return backend_healthy(cached) ? cached : "";
+    }
 
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
@@ -1099,8 +1125,8 @@ static std::string discover_hybrid_backend() {
     const char* hello = "PBDL_DISCOVER_V1";
     std::string found;
 
-    for (int tick = 0; tick < 35 && found.empty(); ++tick) {
-        if (tick == 0 || tick == 10 || tick == 20)
+    for (int tick = 0; tick < 50 && found.empty(); ++tick) {
+        if (tick == 0 || tick == 10 || tick == 20 || tick == 35)
             (void)sendto(fd, hello, std::strlen(hello), 0,
                          reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
 
@@ -1112,10 +1138,27 @@ static std::string discover_hybrid_backend() {
         if (n > 0) {
             buf[n] = 0;
             const std::string msg = trim_copy(std::string(buf));
-            const std::string prefix = "PBDL_BACKEND ";
-            if (msg.compare(0, prefix.size(), prefix) == 0) {
-                found = trim_copy(msg.substr(prefix.size()));
-                break;
+
+            // v7.1: backend returns only its TCP port. We deliberately build
+            // the URL from the UDP packet's SOURCE address, avoiding VPN/
+            // VirtualBox/Tailscale interfaces on the PC.
+            const std::string portPrefix = "PBDL_BACKEND_PORT ";
+            if (msg.compare(0, portPrefix.size(), portPrefix) == 0) {
+                const int port = std::atoi(msg.substr(portPrefix.size()).c_str());
+                const char* ip = inet_ntoa(from.sin_addr);
+                if (ip && port > 0 && port <= 65535) {
+                    found = std::string("http://") + ip + ":" + std::to_string(port);
+                }
+            } else {
+                // Backward compatibility with v7 backend.
+                const std::string prefix = "PBDL_BACKEND ";
+                if (msg.compare(0, prefix.size(), prefix) == 0)
+                    found = trim_copy(msg.substr(prefix.size()));
+            }
+
+            if (!found.empty() && !backend_healthy(found)) {
+                append_diag("HYBRID_HEALTH_FAIL", found);
+                found.clear();
             }
         }
         usleep(100 * 1000);
@@ -1130,9 +1173,13 @@ static std::string discover_hybrid_backend() {
     }
 
     const std::string cached = read_small_file("/data/PBDL/backend.txt");
-    if (!cached.empty()) append_diag("HYBRID_BACKEND_CACHE", cached);
-    else append_diag("HYBRID_BACKEND", "nao encontrado");
-    return cached;
+    if (!cached.empty() && backend_healthy(cached)) {
+        append_diag("HYBRID_BACKEND_CACHE", cached);
+        return cached;
+    }
+
+    append_diag("HYBRID_BACKEND", "nao encontrado");
+    return "";
 }
 
 static bool handle_hybrid_handoff(const std::string& captured,
@@ -1141,16 +1188,20 @@ static bool handle_hybrid_handoff(const std::string& captured,
     if (pos == std::string::npos) return false;
 
     append_diag("HYBRID_HANDOFF", captured);
-    const std::string rest = captured.substr(pos + 9);
-    const bool isPkg = rest.compare(0, 4, "pkg/") == 0;
 
     std::string fileUrl = captured;
     fileUrl.replace(pos, 9, "/file/");
     append_diag("HYBRID_FILE_URL", fileUrl);
 
-    if (isPkg) {
-        g_status = "Hybrid: enviando PKG ao BGFT...";
-        return queue_bgft(fileUrl);
+    // Never trust just the extension/kind sent by the backend. Read the real
+    // PS4 package magic so extensionless PKGs still go through BGFT.
+    PkgInfo pkg;
+    if (fetch_pkg_header(fileUrl, pkg)) {
+        g_status = "Hybrid: PKG real detectado; enviando ao BGFT...";
+        const bool ok = queue_bgft(fileUrl);
+        notify_user(ok ? "Hybrid: PKG enviado ao BGFT." :
+                         ("Hybrid: falha no BGFT - " + g_status));
+        return ok;
     }
 
     UrlProbe probe = probe_url(fileUrl, browserHome);
@@ -1160,11 +1211,15 @@ static bool handle_hybrid_handoff(const std::string& captured,
     }
     if (!probe.ok) {
         g_status = "Hybrid: backend nao respondeu ao arquivo";
+        notify_user(g_status);
         return false;
     }
 
     g_status = "Hybrid: enviando arquivo ao daemon...";
-    return queue_generic_background(probe);
+    const bool ok = queue_generic_background(probe);
+    notify_user(ok ? ("Hybrid: download iniciado - " + filename_for_probe(probe))
+                   : ("Hybrid: falha no download - " + g_status));
+    return ok;
 }
 
 static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
@@ -1174,67 +1229,74 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     sceUserServiceGetInitialUser(&user);
 
     static const char* fallbackHome = "https://www.google.com/?hl=pt-BR";
-    const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : fallbackHome;
+    const std::string startUrl =
+        (requestedUrl && *requestedUrl) ? requestedUrl : fallbackHome;
     const std::string callbackRegex = make_navigation_regex(startUrl);
 
-    BrowserCallbackInitParam cb{};
-    cb.size = sizeof(cb);
-    cb.type = CALLBACK_TYPE_REGEXP;
-    cb.data = callbackRegex.c_str();
-
-    BrowserParam p{};
-    p.baseParam.size = sizeof(CommonDialogBaseParam);
-    p.baseParam.magic = DIALOG_MAGIC + static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&p.baseParam));
-    p.size = sizeof(p);
-    p.mode = BROWSER_MODE_DEFAULT;
-    p.userId = user;
-    p.url = startUrl;
-    p.callbackInitParam = &cb;
-
-    g_status = "Hybrid v7: abrindo interface...";
-    int32_t r = g_browser.open(&p);
-    if (r != 0) {
-        g_status = "Hybrid browser open: " + hex32(r);
-        return false;
-    }
-
     for (;;) {
-        const int32_t st = g_browser.updateStatus();
-        if (st == DIALOG_STATUS_FINISHED) break;
-        if (st < 0) {
-            g_status = "Hybrid update status: " + hex32(st);
+        BrowserCallbackInitParam cb{};
+        cb.size = sizeof(cb);
+        cb.type = CALLBACK_TYPE_REGEXP;
+        cb.data = callbackRegex.c_str();
+
+        BrowserParam p{};
+        p.baseParam.size = sizeof(CommonDialogBaseParam);
+        p.baseParam.magic = DIALOG_MAGIC +
+            static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&p.baseParam));
+        p.size = sizeof(p);
+        p.mode = BROWSER_MODE_DEFAULT;
+        p.userId = user;
+        p.url = startUrl.c_str();
+        p.callbackInitParam = &cb;
+
+        g_status = "Hybrid v7.1: abrindo interface...";
+        int32_t r = g_browser.open(&p);
+        if (r != 0) {
+            g_status = "Hybrid browser open: " + hex32(r);
+            notify_user(g_status);
             return false;
         }
-        usleep(16 * 1000);
+
+        for (;;) {
+            const int32_t st = g_browser.updateStatus();
+            if (st == DIALOG_STATUS_FINISHED) break;
+            if (st < 0) {
+                g_status = "Hybrid update status: " + hex32(st);
+                notify_user(g_status);
+                return false;
+            }
+            usleep(16 * 1000);
+        }
+
+        BrowserCallbackResultParam cbout{};
+        cbout.size = sizeof(cbout);
+        BrowserResult result{};
+        result.callbackResultParam = &cbout;
+
+        r = g_browser.getResult(&result);
+        if (r != 0) {
+            g_status = "Hybrid get result: " + hex32(r);
+            notify_user(g_status);
+            return false;
+        }
+
+        std::string captured;
+        if (result.result == DIALOG_RESULT_CALLBACK && cbout.data)
+            captured = cbout.data;
+        if (captured.empty() && cbout.buffer && cbout.bufferSize)
+            captured.assign(cbout.buffer, cbout.bufferSize);
+
+        if (!captured.empty() && captured.find("/handoff/") != std::string::npos) {
+            (void)handle_hybrid_handoff(captured, startUrl);
+            // Intentional callback closes the dialog. Reopen in this loop,
+            // not recursively, so many downloads cannot grow the stack.
+            continue;
+        }
+
+        g_status = "Hybrid v7.1 fechado normalmente";
+        return true;
     }
-
-    BrowserCallbackResultParam cbout{};
-    cbout.size = sizeof(cbout);
-    BrowserResult result{};
-    result.callbackResultParam = &cbout;
-
-    r = g_browser.getResult(&result);
-    if (r != 0) {
-        g_status = "Hybrid get result: " + hex32(r);
-        return false;
-    }
-
-    std::string captured;
-    if (result.result == DIALOG_RESULT_CALLBACK && cbout.data)
-        captured = cbout.data;
-    if (captured.empty() && cbout.buffer && cbout.bufferSize)
-        captured.assign(cbout.buffer, cbout.bufferSize);
-
-    if (!captured.empty() && captured.find("/handoff/") != std::string::npos) {
-        (void)handle_hybrid_handoff(captured, startUrl);
-        // Callback intentionally finishes the dialog. Reopen our backend UI.
-        return open_browser_and_wait(startUrl);
-    }
-
-    g_status = "Hybrid v7 fechado normalmente";
-    return true;
 }
-
 
 } // namespace
 
@@ -1243,20 +1305,25 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.1 audited");
 
-    (void)start_download_daemon();
+    const bool daemonReady = start_download_daemon();
+    if (!daemonReady) {
+        append_diag("DAEMON_WARN", g_status);
+        notify_user("Hybrid: BinLoader/daemon indisponivel. Arquivos comuns nao terao background.");
+    }
 
     std::string backend = discover_hybrid_backend();
-    if (!backend.empty()) {
-        if (backend.back() != '/') backend.push_back('/');
-        append_diag("HYBRID_OPEN", backend);
-        (void)open_browser_and_wait(backend.c_str());
-    } else {
-        // Keep the console useful even if the PC backend is not running.
-        append_diag("HYBRID_FALLBACK", "backend nao encontrado; abrindo Google local");
-        (void)open_browser_and_wait("https://www.google.com/?hl=pt-BR");
+    if (backend.empty()) {
+        append_diag("HYBRID_FATAL", "backend nao encontrado");
+        notify_user("Hybrid: backend Chromium nao encontrado. Inicie o start_windows.bat e libere a rede privada.");
+        sleep(4);
+        clean_exit_to_shell();
     }
+
+    if (backend.back() != '/') backend.push_back('/');
+    append_diag("HYBRID_OPEN", backend);
+    (void)open_browser_and_wait(backend.c_str());
 
     clean_exit_to_shell();
     return 0;

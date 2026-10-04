@@ -14,3 +14,13 @@ A interface inclui URL/pesquisa, voltar, avançar, recarregar, scroll, envio de 
 Quando um download aparece, clique em BAIXAR NO PS4.
 
 Não exponha a porta 32124 diretamente à Internet sem autenticação.
+
+
+## v7.1 auditado
+
+- A descoberta usa o IP de origem do pacote UDP, evitando escolher VPN/VirtualBox/Tailscale.
+- O PS4 valida /health antes de abrir o backend.
+- Se o backend nao for encontrado, nao volta silenciosamente ao navegador local antigo.
+- Downloads iniciados por sites sao concluidos no Chromium antes do handoff. Isso evita perder URLs temporarias/de uso unico.
+- Para arquivos comuns em background, GoldHEN BinLoader precisa estar ativo na porta 9090.
+- Para PKG, o cliente detecta o magic real do pacote e usa BGFT mesmo sem extensao .pkg.

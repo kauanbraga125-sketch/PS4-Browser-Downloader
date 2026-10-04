@@ -62,34 +62,41 @@ function registerRemote(url, name, reqInfo, contentType) {
 async function registerDownload(download) {
   const url = download.url();
   const filename = safeName(download.suggestedFilename() || guessName(url, "download.bin"));
-  if (/^https?:/i.test(url)) {
-    registerRemote(url, filename, recentRequests.get(url) || null, null);
-    try { await download.cancel(); } catch (_) {}
-    return;
-  }
-
   const token = crypto.randomUUID();
   const kind = isPkg(filename) ? "pkg" : "file";
   const dir = path.join(os.tmpdir(), "ps4-browser-hybrid");
   fs.mkdirSync(dir, { recursive: true });
   const localPath = path.join(dir, token + "-" + filename);
+
   const meta = {
     token: token, kind: kind, url: url, filename: filename,
-    requestInfo: null, contentType: "application/octet-stream",
+    requestInfo: recentRequests.get(url) || null,
+    contentType: "application/octet-stream",
     referer: page ? page.url() : "", localPath: localPath, ready: false
   };
   downloads.set(token, meta);
+
+  // Important for one-time/temporary hoster URLs: do NOT cancel and re-fetch.
+  // Let the modern Chromium session consume the real download using its own
+  // cookies, JS challenges, POST body and tokens, then serve that local file
+  // to the PS4 with Range support.
   lastDownload = {
     token: token, kind: kind, filename: filename,
-    handoff: "/handoff/" + kind + "/" + token + "/" + encodeURIComponent(filename)
+    preparing: true, handoff: null
   };
-  lastMessage = "Chromium esta preparando: " + filename;
+  lastMessage = "Chromium esta baixando no PC: " + filename;
+
   try {
     await download.saveAs(localPath);
     meta.ready = true;
-    lastMessage = "Download pronto para enviar ao PS4: " + filename;
+    lastDownload = {
+      token: token, kind: kind, filename: filename, preparing: false,
+      handoff: "/handoff/" + kind + "/" + token + "/" + encodeURIComponent(filename)
+    };
+    lastMessage = "Arquivo pronto para enviar ao PS4: " + filename;
   } catch (e) {
-    lastMessage = "Falha preparando download: " + String(e.message || e);
+    lastDownload = null;
+    lastMessage = "Falha no download Chromium: " + String(e.message || e);
   }
 }
 
@@ -189,7 +196,7 @@ app.get("/", async function(_req, res) {
   res.sendFile(path.join(__dirname, "index.html"));
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.0.0" });
+  res.json({ ok: true, version: "7.1.0" });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -321,13 +328,19 @@ app.get("/file/:kind/:token/:name", async function(req, res) {
 });
 
 const server = app.listen(HTTP_PORT, "0.0.0.0", async function() {
-  console.log("[Hybrid] HTTP: http://" + getLanIp() + ":" + HTTP_PORT);
-  await ensurePage();
+  console.log("[Hybrid] HTTP port:", HTTP_PORT);
+  console.log("[Hybrid] LAN hint:", getLanIp());
+  try {
+    await ensurePage();
+  } catch (e) {
+    lastMessage = "Chromium nao iniciou: " + String(e.message || e);
+    console.error(lastMessage);
+  }
 });
 const udp = dgram.createSocket("udp4");
 udp.on("message", function(msg, rinfo) {
   if (String(msg).trim() !== "PBDL_DISCOVER_V1") return;
-  const payload = Buffer.from("PBDL_BACKEND http://" + getLanIp() + ":" + HTTP_PORT);
+  const payload = Buffer.from("PBDL_BACKEND_PORT " + HTTP_PORT);
   udp.send(payload, rinfo.port, rinfo.address);
 });
 udp.bind(DISCOVERY_PORT, "0.0.0.0", function() {
