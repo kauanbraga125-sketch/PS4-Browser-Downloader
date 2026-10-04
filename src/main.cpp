@@ -16,6 +16,12 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <time.h>
 
 namespace {
 
@@ -246,7 +252,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/1.0", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.0", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -393,6 +399,412 @@ static bool looks_like_pkg(std::string u) {
     return u.size() >= 4 && u.substr(u.size() - 4) == ".pkg";
 }
 
+
+struct UrlProbe {
+    bool ok = false;
+    int32_t status = 0;
+    uint64_t contentLength = 0;
+    std::string finalUrl;
+    std::string contentType;
+    std::string contentDisposition;
+};
+
+static std::string lower_copy(std::string v) {
+    std::transform(v.begin(), v.end(), v.begin(),
+        [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
+    return v;
+}
+
+static std::string header_value(const std::string& headers, const char* wanted) {
+    const std::string target = lower_copy(std::string(wanted));
+    size_t pos = 0;
+    while (pos < headers.size()) {
+        size_t end = headers.find('\n', pos);
+        if (end == std::string::npos) end = headers.size();
+        std::string line = headers.substr(pos, end - pos);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t colon = line.find(':');
+        if (colon != std::string::npos) {
+            std::string name = lower_copy(line.substr(0, colon));
+            if (name == target) {
+                size_t b = colon + 1;
+                while (b < line.size() && (line[b] == ' ' || line[b] == '\t')) ++b;
+                return line.substr(b);
+            }
+        }
+        pos = end + 1;
+    }
+    return "";
+}
+
+static bool split_http_url(const std::string& url, std::string& origin, std::string& path) {
+    size_t scheme = url.find("://");
+    if (scheme == std::string::npos) return false;
+    size_t slash = url.find('/', scheme + 3);
+    if (slash == std::string::npos) {
+        origin = url;
+        path = "/";
+    } else {
+        origin = url.substr(0, slash);
+        path = url.substr(slash);
+    }
+    return origin.rfind("http://", 0) == 0 || origin.rfind("https://", 0) == 0;
+}
+
+static std::string resolve_location(const std::string& base, const std::string& loc) {
+    if (loc.rfind("http://", 0) == 0 || loc.rfind("https://", 0) == 0) return loc;
+    size_t scheme = base.find("://");
+    if (scheme == std::string::npos) return loc;
+    if (loc.rfind("//", 0) == 0) return base.substr(0, scheme) + ":" + loc;
+
+    std::string origin, path;
+    if (!split_http_url(base, origin, path)) return loc;
+    if (!loc.empty() && loc[0] == '/') return origin + loc;
+
+    size_t q = path.find_first_of("?#");
+    if (q != std::string::npos) path.resize(q);
+    size_t slash = path.find_last_of('/');
+    std::string dir = (slash == std::string::npos) ? "/" : path.substr(0, slash + 1);
+    return origin + dir + loc;
+}
+
+static uint64_t parse_content_range_total(const std::string& v) {
+    size_t slash = v.find_last_of('/');
+    if (slash == std::string::npos || slash + 1 >= v.size() || v[slash + 1] == '*') return 0;
+    return strtoull(v.c_str() + slash + 1, nullptr, 10);
+}
+
+static UrlProbe probe_url(const std::string& input, const std::string& referer = "") {
+    UrlProbe out;
+    if (!init_network()) return out;
+
+    std::string current = input;
+    for (int redirect = 0; redirect < 8; ++redirect) {
+        const int tmpl = sceHttpCreateTemplate(
+            g_http,
+            "Mozilla/5.0 (PlayStation 4; WebKit) AppleWebKit/605.1.15 Safari/605.1.15",
+            ORBIS_HTTP_VERSION_1_1, 1);
+        if (tmpl < 0) return out;
+
+        const int conn = sceHttpCreateConnectionWithURL(tmpl, current.c_str(), true);
+        if (conn < 0) {
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        const int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, current.c_str(), 0);
+        if (req < 0) {
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        sceHttpAddRequestHeader(req, "Range", "bytes=0-0", 1);
+        sceHttpAddRequestHeader(req, "Accept", "*/*", 1);
+        sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
+        if (!referer.empty()) sceHttpAddRequestHeader(req, "Referer", referer.c_str(), 1);
+        sceHttpSetConnectTimeOut(req, 15 * 1000 * 1000);
+        sceHttpSetResolveTimeOut(req, 15 * 1000 * 1000);
+        sceHttpSetRecvTimeOut(req, 20 * 1000 * 1000);
+
+        int32_t r = sceHttpSendRequest(req, nullptr, 0);
+        if (r < 0) {
+            sceHttpDeleteRequest(req);
+            sceHttpDeleteConnection(conn);
+            sceHttpDeleteTemplate(tmpl);
+            return out;
+        }
+
+        int32_t code = 0;
+        sceHttpGetStatusCode(req, &code);
+
+        char* raw = nullptr;
+        size_t rawSize = 0;
+        std::string headers;
+        if (sceHttpGetAllResponseHeaders(req, &raw, &rawSize) >= 0 && raw && rawSize)
+            headers.assign(raw, rawSize);
+
+        const std::string location = header_value(headers, "location");
+        const std::string ctype = header_value(headers, "content-type");
+        const std::string cdisp = header_value(headers, "content-disposition");
+        const std::string clen = header_value(headers, "content-length");
+        const std::string crange = header_value(headers, "content-range");
+
+        uint64_t length = 0;
+        if (!crange.empty()) length = parse_content_range_total(crange);
+        if (!length && !clen.empty()) length = strtoull(clen.c_str(), nullptr, 10);
+
+        sceHttpDeleteRequest(req);
+        sceHttpDeleteConnection(conn);
+        sceHttpDeleteTemplate(tmpl);
+
+        if (code >= 300 && code < 400 && !location.empty()) {
+            current = resolve_location(current, location);
+            continue;
+        }
+
+        out.ok = (code >= 200 && code < 400);
+        out.status = code;
+        out.finalUrl = current;
+        out.contentType = ctype;
+        out.contentDisposition = cdisp;
+        out.contentLength = length;
+        return out;
+    }
+    return out;
+}
+
+static bool is_file_extension(std::string url) {
+    size_t cut = url.find_first_of("?#");
+    if (cut != std::string::npos) url.resize(cut);
+    url = lower_copy(url);
+    static const char* exts[] = {
+        ".pkg",".zip",".7z",".rar",".iso",".bin",".chd",".cso",".pbp",".rom",
+        ".nes",".sfc",".smc",".gba",".gbc",".gb",".n64",".z64",".nds",".3ds",".cia",
+        ".jpg",".jpeg",".png",".gif",".webp",".bmp",".mp4",".mkv",".avi",".mov",
+        ".mp3",".flac",".wav",".pdf"
+    };
+    for (const char* e : exts) {
+        const size_t n = std::strlen(e);
+        if (url.size() >= n && url.compare(url.size() - n, n, e) == 0) return true;
+    }
+    return false;
+}
+
+static bool probe_is_download(const UrlProbe& p) {
+    const std::string ct = lower_copy(p.contentType);
+    const std::string cd = lower_copy(p.contentDisposition);
+    if (cd.find("attachment") != std::string::npos || cd.find("filename=") != std::string::npos ||
+        cd.find("filename*=") != std::string::npos) return true;
+    if (is_file_extension(p.finalUrl)) return true;
+    if (ct.rfind("image/", 0) == 0 || ct.rfind("video/", 0) == 0 || ct.rfind("audio/", 0) == 0)
+        return true;
+    if (ct.find("application/octet-stream") != std::string::npos ||
+        ct.find("application/zip") != std::string::npos ||
+        ct.find("application/x-7z") != std::string::npos ||
+        ct.find("application/x-rar") != std::string::npos ||
+        ct.find("application/pdf") != std::string::npos ||
+        ct.find("application/x-iso9660") != std::string::npos)
+        return true;
+    return false;
+}
+
+static std::string safe_filename(std::string name) {
+    if (name.empty()) name = "download.bin";
+    for (char& c : name) {
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' ||
+            c == '"' || c == '<' || c == '>' || c == '|')
+            c = '_';
+    }
+    while (!name.empty() && (name.front() == ' ' || name.front() == '.')) name.erase(name.begin());
+    if (name.empty()) name = "download.bin";
+    if (name.size() > 180) name.resize(180);
+    return name;
+}
+
+static std::string filename_for_probe(const UrlProbe& p) {
+    const std::string cd = p.contentDisposition;
+    std::string lower = lower_copy(cd);
+    size_t at = lower.find("filename=");
+    if (at != std::string::npos) {
+        std::string v = cd.substr(at + 9);
+        size_t semi = v.find(';');
+        if (semi != std::string::npos) v.resize(semi);
+        while (!v.empty() && (v.front() == ' ' || v.front() == '"' || v.front() == '\'')) v.erase(v.begin());
+        while (!v.empty() && (v.back() == ' ' || v.back() == '"' || v.back() == '\'' || v.back() == '\r')) v.pop_back();
+        if (!v.empty()) return safe_filename(v);
+    }
+
+    std::string u = p.finalUrl;
+    size_t cut = u.find_first_of("?#");
+    if (cut != std::string::npos) u.resize(cut);
+    size_t slash = u.find_last_of('/');
+    std::string name = (slash == std::string::npos) ? u : u.substr(slash + 1);
+    return safe_filename(name);
+}
+
+static bool port_open(uint16_t port) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    bool ok = connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) == 0;
+    close(fd);
+    return ok;
+}
+
+static bool start_download_daemon() {
+    if (port_open(6701)) return true;
+
+    int filefd = open("/app0/daemon/daemon.elf", O_RDONLY);
+    if (filefd < 0) {
+        g_status = "daemon.elf nao encontrado";
+        return false;
+    }
+
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        close(filefd);
+        return false;
+    }
+
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(9090);
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(sockfd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
+        close(sockfd);
+        close(filefd);
+        g_status = "GoldHEN BinLoader 9090 indisponivel";
+        return false;
+    }
+
+    char buf[8192];
+    for (;;) {
+        ssize_t n = read(filefd, buf, sizeof(buf));
+        if (n == 0) break;
+        if (n < 0) {
+            close(sockfd);
+            close(filefd);
+            return false;
+        }
+        ssize_t sent = 0;
+        while (sent < n) {
+            ssize_t w = write(sockfd, buf + sent, static_cast<size_t>(n - sent));
+            if (w <= 0) {
+                close(sockfd);
+                close(filefd);
+                return false;
+            }
+            sent += w;
+        }
+    }
+    close(sockfd);
+    close(filefd);
+
+    for (int i = 0; i < 50; ++i) {
+        usleep(100 * 1000);
+        if (port_open(6701)) return true;
+    }
+    g_status = "Daemon nao iniciou na porta 6701";
+    return false;
+}
+
+static std::string json_escape(const std::string& in) {
+    std::string out;
+    out.reserve(in.size() + 16);
+    for (unsigned char c : in) {
+        switch (c) {
+            case '\\': out += "\\\\"; break;
+            case '"': out += "\\\""; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c >= 0x20) out += static_cast<char>(c);
+                break;
+        }
+    }
+    return out;
+}
+
+static bool post_local_json(const char* path, const std::string& body) {
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(6701);
+    sa.sin_addr.s_addr = inet_addr("127.0.0.1");
+    if (connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
+        close(fd);
+        return false;
+    }
+
+    std::string req =
+        std::string("POST ") + path + " HTTP/1.1\r\n"
+        "Host: 127.0.0.1:6701\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n"
+        "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+
+    size_t off = 0;
+    while (off < req.size()) {
+        ssize_t n = write(fd, req.data() + off, req.size() - off);
+        if (n <= 0) {
+            close(fd);
+            return false;
+        }
+        off += static_cast<size_t>(n);
+    }
+
+    char response[512]{};
+    ssize_t got = read(fd, response, sizeof(response) - 1);
+    close(fd);
+    if (got <= 0) return false;
+    return std::strstr(response, " 200 ") != nullptr;
+}
+
+static bool queue_generic_background(const UrlProbe& p) {
+    if (!start_download_daemon()) return false;
+
+    std::string origin, path;
+    if (!split_http_url(p.finalUrl, origin, path)) {
+        g_status = "URL de download invalida";
+        return false;
+    }
+
+    mkdir("/data/Downloads", 0777);
+    const std::string name = filename_for_probe(p);
+    const std::string dest = "/data/Downloads/" + name;
+    const uint64_t id = (static_cast<uint64_t>(time(nullptr)) << 16) ^
+                        static_cast<uint64_t>(getpid() & 0xFFFF);
+
+    std::string body =
+        "{\"type\":4,\"url\":\"" + json_escape(origin) +
+        "\",\"username\":\"\",\"password\":\"\",\"http_server_type\":\"" +
+        "\",\"src_path\":\"" + json_escape(path) +
+        "\",\"dest_path\":\"" + json_escape(dest) +
+        "\",\"size\":" + std::to_string(p.contentLength) +
+        ",\"id\":" + std::to_string(id) + "}";
+
+    if (!post_local_json("/download_url", body)) {
+        g_status = "Falha enviando download ao daemon";
+        return false;
+    }
+
+    g_status = "Download em segundo plano: " + name;
+    g_lastUrl = p.finalUrl;
+    return true;
+}
+
+static bool handle_captured_url(const std::string& captured, const std::string& referer, std::string& reopenUrl) {
+    UrlProbe p = probe_url(captured, referer);
+    if (!p.ok) {
+        // Some protected pages refuse a probe but still render correctly in WebKit.
+        reopenUrl = captured;
+        return false;
+    }
+
+    // Detect PKG by file magic, not only by the extension.
+    PkgInfo info;
+    if (fetch_pkg_header(p.finalUrl, info)) {
+        g_status = "PKG detectado. Enviando ao BGFT...";
+        return queue_bgft(p.finalUrl);
+    }
+
+    if (probe_is_download(p)) {
+        if (queue_generic_background(p)) return true;
+        // If the persistent daemon cannot start, give the WebKit a chance rather than crash.
+        reopenUrl = p.finalUrl;
+        return false;
+    }
+
+    reopenUrl = p.finalUrl.empty() ? captured : p.finalUrl;
+    return false;
+}
+
 static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     if (!init_browser()) return false;
 
@@ -411,20 +823,20 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     static const char* homeUrl = "https://www.google.com/?hl=pt-BR";
     const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : homeUrl;
     static const char* callbackRegexDefault =
-        "^(https://www\\.superpsx\\.com/ps4-fake-pkgs-game-list/?|https?://.*\\.pkg([?#].*)?)$";
-    static const char* callbackRegexPkgOnly =
-        "^https?://.*\\.pkg([?#].*)?$";
+        "^(https?://www\\.superpsx\\.com/(ps4-fake-pkgs-game-list/?.*|.*-ps4-fpkg/?.*)|"
+        "https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
+        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*)$";
+    static const char* callbackRegexDownloads =
+        "^(https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
+        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*)$";
 
-    const bool openingSuperPsxGames =
-        requestedUrl &&
-        std::strncmp(requestedUrl,
-                     "https://www.superpsx.com/ps4-fake-pkgs-game-list",
-                     54) == 0;
+    const bool openingSuperPsxInternal =
+        requestedUrl && std::strstr(requestedUrl, "superpsx.com/") != nullptr;
 
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
     cb.type = CALLBACK_TYPE_REGEXP;
-    cb.data = openingSuperPsxGames ? callbackRegexPkgOnly : callbackRegexDefault;
+    cb.data = openingSuperPsxInternal ? callbackRegexDownloads : callbackRegexDefault;
 
     BrowserParam p{};
     p.baseParam.size = sizeof(CommonDialogBaseParam);
@@ -438,42 +850,13 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     g_status = "Abrindo WebKit do PS4 (modo completo)...";
     int32_t r = g_browser.open(&p);
 
-    if (r != 0) {
-        /*
-         * Fallback to the old custom rectangle, but expose the complete
-         * navigation control family.  We do not reset cookies between the two
-         * attempts, so challenge/session cookies remain in the browser store.
-         */
-        BrowserImeParam ime{};
-        ime.size = sizeof(ime);
-        ime.option = 0;
-
-        BrowserWebViewParam webview{};
-        webview.size = sizeof(webview);
-        webview.option = 0;
-
-        p.mode = BROWSER_MODE_CUSTOM;
-        p.width = 1920;
-        p.height = 963;
-        p.positionX = 0;
-        p.positionY = 117;
-        p.parts = 0x3;      // title + address
-        p.headerWidth = 1920;
-        p.control = 0x7F;   // exit/reload/back/forward/zoom/options family
-        p.imeParam = &ime;
-        p.webviewParam = &webview;
-        p.animation = 0;
-
-        g_status = "Modo completo indisponivel; tentando WebKit custom...";
-        r = g_browser.open(&p);
-    }
 
     if (r != 0) {
         g_status = "Browser WebKit open: " + hex32(r);
         return false;
     }
 
-    g_status = "WebKit aberto: JavaScript/cookies do sistema ativos. Links .pkg vao para BGFT.";
+    g_status = "WebKit v5: downloads interceptados; PKG=BGFT, arquivos=daemon.";
 
     bool finished = false;
     for (;;) {
@@ -514,18 +897,23 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     // IMPORTANT: do not call sceWebBrowserDialogClose() after FINISHED/GetResult.
 
     if (!captured.empty()) {
-        if (!openingSuperPsxGames &&
-            captured.find("https://www.superpsx.com/ps4-fake-pkgs-game-list") == 0) {
-            g_status = "Abrindo lista PS4 do SuperPSX diretamente...";
+        if (!openingSuperPsxInternal &&
+            captured.find("https://www.superpsx.com/") == 0) {
+            g_status = "Abrindo pagina SuperPSX na mesma janela...";
             return open_browser_and_wait(captured.c_str());
         }
-        if (looks_like_pkg(captured)) {
-            g_status = "Link PKG capturado. Preparando download em segundo plano...";
-            return queue_bgft(captured);
+
+        std::string reopen;
+        if (handle_captured_url(captured, startUrl, reopen)) {
+            // Download is now owned by BGFT or the persistent daemon.
+            // Reopen the page that originated the download so browsing can continue.
+            return open_browser_and_wait(startUrl);
         }
+        if (!reopen.empty() && reopen != startUrl)
+            return open_browser_and_wait(reopen.c_str());
     }
 
-    g_status = "Navegador fechado - v4.4.1";
+    g_status = "Navegador fechado - v5";
     return true;
 }
 
@@ -535,6 +923,8 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     sceUserServiceInitialize(nullptr);
+    mkdir("/data/Downloads", 0777);
+    (void)start_download_daemon();
 
     // Keep the same DEFAULT WebKit path proven on hardware.
     (void)open_browser_and_wait();

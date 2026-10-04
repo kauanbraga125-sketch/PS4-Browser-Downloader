@@ -1,8 +1,8 @@
-name: Build PS4 WebKit Browser v4.4.1 System Exit
+name: Build PS4 WebKit Browser v5 Download Engine
 
 on:
   push:
-    branches: [ native-webkit-v4 ]
+    branches: [ webkit-v5-download-engine ]
   workflow_dispatch:
 
 permissions:
@@ -15,6 +15,28 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Fetch background daemon source
+        run: |
+          set -euxo pipefail
+          mkdir -p third_party
+          git clone --no-checkout https://github.com/cy33hc/ps4-ezremote-server.git third_party/ezremote-server
+          git -C third_party/ezremote-server checkout 7967905c5d7928ce1888f9c6c34cd6510d97ad77
+
+      - name: Build background daemon
+        uses: Scene-Collective/ps4-payload-sdk@v1
+        with:
+          app_path: third_party/ezremote-server
+          build_command: |
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build -j2
+            mkdir -p ../../daemon
+            cp build/ezremote-server-1.06.elf ../../daemon/daemon.elf
+
+      - name: Verify background daemon
+        run: |
+          test -s daemon/daemon.elf
+          sha256sum daemon/daemon.elf
 
       - name: Install host dependencies
         run: |
@@ -58,15 +80,15 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_4_1_SystemExit.pkg
-          sha256sum PS4_Browser_WebKit_v4_4_1_SystemExit.pkg > PS4_Browser_WebKit_v4_4_1_SystemExit.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v5_DownloadEngine.pkg
+          sha256sum PS4_Browser_WebKit_v5_DownloadEngine.pkg > PS4_Browser_WebKit_v5_DownloadEngine.pkg.sha256
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-WebKit-v4-4-1-SystemExit
+          name: PS4-Browser-WebKit-v5-DownloadEngine
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Browser_WebKit_v4_4_1_SystemExit.pkg
-            PS4_Browser_WebKit_v4_4_1_SystemExit.pkg.sha256
+            PS4_Browser_WebKit_v5_DownloadEngine.pkg
+            PS4_Browser_WebKit_v5_DownloadEngine.pkg.sha256
