@@ -36,11 +36,13 @@ jobs:
           echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
 
       - name: Build NetSurf for PS4
+        id: build
         run: |
           chmod +x scripts/build_netsurf_ps4.sh
           scripts/build_netsurf_ps4.sh
 
       - name: Package independent PS4 PKG
+        id: package
         run: |
           set -euxo pipefail
           chmod +x scripts/package_netsurf_ps4.sh
@@ -70,6 +72,7 @@ jobs:
             PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg.sha256
 
       - name: Publish v3.0 test package
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -96,7 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           state="failure"
-          description="NetSurf v3.0 package build failed"
+          description="build=${{ steps.build.outcome }} package=${{ steps.package.outcome }} publish=${{ steps.publish.outcome }}"
           if [ "$JOB_STATUS" = "success" ]; then
             state="success"
             description="NetSurf v3.0 package built successfully"
