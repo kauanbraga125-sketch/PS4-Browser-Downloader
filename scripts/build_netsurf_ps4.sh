@@ -391,7 +391,7 @@ s = s.replace(
     "#ifdef ORBIS\n"
     "\t/* Re-enable real site CSS and common raster images. */\n"
     "\tnsoption_set_bool(author_level_css, true);\n"
-    "\tnsoption_set_bool(enable_javascript, true);\n"
+    "\tnsoption_set_bool(enable_javascript, false);\n"
     "\tnsoption_set_int(script_timeout, 8);\n"
     "\tnsoption_set_bool(foreground_images, true);\n"
     "\tnsoption_set_bool(background_images, true);\n"
@@ -842,7 +842,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = "https://www.google.com/";
+	feurl = "about:welcome";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
@@ -1021,8 +1021,9 @@ input[type=submit] {
   <h1>PS4 Browser</h1>
   <div class="subtitle">Pesquise e abra sites sem depender de JavaScript</div>
 
-  <form action="https://html.duckduckgo.com/html/" method="get">
+  <form action="https://html.duckduckgo.com/html/" method="post">
     <input type="text" name="q" placeholder="Pesquisar na web" autofocus>
+    <input type="hidden" name="b" value="">
     <br>
     <input type="submit" value="Pesquisar">
   </form>
@@ -1035,7 +1036,7 @@ input[type=submit] {
 
   <div class="help">
     X: clicar / abrir teclado &nbsp;&nbsp;•&nbsp;&nbsp; O: voltar<br>
-    A busca usa uma página HTML compatível com navegadores sem JavaScript.
+    Busca HTML estável sem JavaScript. Abra qualquer resultado com X.
   </div>
 </main>
 </body>
