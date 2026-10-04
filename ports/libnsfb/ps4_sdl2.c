@@ -227,12 +227,52 @@ static int ps4_finalise(nsfb_t *nsfb)
     return 0;
 }
 
+static bool ps4_emit_stick_motion(nsfb_t *nsfb,
+                                   struct ps4_sdl2_surface *s,
+                                   nsfb_event_t *event)
+{
+    if (s == NULL || s->pad == NULL)
+        return false;
+
+    SDL_JoystickUpdate();
+    const int ax = SDL_JoystickGetAxis(s->pad, 0);
+    const int ay = SDL_JoystickGetAxis(s->pad, 1);
+    const int deadzone = 5500;
+
+    int dx = (abs(ax) > deadzone) ? ax / 1500 : 0;
+    int dy = (abs(ay) > deadzone) ? ay / 1500 : 0;
+
+    if (dx == 0 && dy == 0)
+        return false;
+
+    s->pointer_x += dx;
+    s->pointer_y += dy;
+
+    if (s->pointer_x < 0) s->pointer_x = 0;
+    if (s->pointer_y < 0) s->pointer_y = 0;
+    if (s->pointer_x >= nsfb->width) s->pointer_x = nsfb->width - 1;
+    if (s->pointer_y >= nsfb->height) s->pointer_y = nsfb->height - 1;
+
+    event->type = NSFB_EVENT_MOVE_ABSOLUTE;
+    event->value.vector.x = s->pointer_x;
+    event->value.vector.y = s->pointer_y;
+    event->value.vector.z = 0;
+    return true;
+}
+
 static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 {
     struct ps4_sdl2_surface *s =
         (struct ps4_sdl2_surface *)nsfb->surface_priv;
     SDL_Event in;
     int got = 0;
+
+    /*
+     * Axis events are edge/change driven in SDL. Polling the held stick here
+     * makes the PS4 pointer move continuously and allows acceleration.
+     */
+    if (ps4_emit_stick_motion(nsfb, s, event))
+        return true;
 
     if (timeout == 0) {
         got = SDL_PollEvent(&in);
@@ -281,32 +321,8 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         event->value.keycode = NSFB_KEY_MOUSE_1;
         return true;
 
-    case SDL_JOYAXISMOTION: {
-        const int deadzone = 9000;
-        int dx = 0;
-        int dy = 0;
-
-        if (in.jaxis.axis == 0 && abs(in.jaxis.value) > deadzone)
-            dx = in.jaxis.value / 5000;
-        if (in.jaxis.axis == 1 && abs(in.jaxis.value) > deadzone)
-            dy = in.jaxis.value / 5000;
-        if (dx == 0 && dy == 0)
-            return false;
-
-        s->pointer_x += dx;
-        s->pointer_y += dy;
-
-        if (s->pointer_x < 0) s->pointer_x = 0;
-        if (s->pointer_y < 0) s->pointer_y = 0;
-        if (s->pointer_x >= nsfb->width) s->pointer_x = nsfb->width - 1;
-        if (s->pointer_y >= nsfb->height) s->pointer_y = nsfb->height - 1;
-
-        event->type = NSFB_EVENT_MOVE_ABSOLUTE;
-        event->value.vector.x = s->pointer_x;
-        event->value.vector.y = s->pointer_y;
-        event->value.vector.z = 0;
-        return true;
-    }
+    case SDL_JOYAXISMOTION:
+        return ps4_emit_stick_motion(nsfb, s, event);
 
     case SDL_JOYBUTTONDOWN:
     case SDL_JOYBUTTONUP:
