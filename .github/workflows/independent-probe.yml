@@ -1,0 +1,67 @@
+name: Independent Engine Toolchain Probe
+
+on:
+  push:
+    branches: [ independent-engine-poc ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 make curl tar python3
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+
+      - name: Download OpenOrbis v0.5.4
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-all-errors             https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz             -o toolchain.tar.gz
+          echo '3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526  toolchain.tar.gz' | sha256sum -c -
+          mkdir -p .openorbis
+          tar xzf toolchain.tar.gz -C .openorbis
+          LINK_X=$(find "$GITHUB_WORKSPACE/.openorbis" -type f -name link.x -print -quit)
+          test -n "$LINK_X"
+          echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
+
+      - name: Inventory browser-relevant SDK pieces
+        run: |
+          set -euxo pipefail
+          echo "== static/shared libraries =="
+          find "$OO_PS4_TOOLCHAIN/lib" -maxdepth 1 -type f -printf '%f
+' | sort |             grep -Ei 'SDL|curl|ssl|http|net|freetype|png|jpeg|z|xml|icu|pthread|video|pad' || true
+          echo "== headers =="
+          find "$OO_PS4_TOOLCHAIN/include" -maxdepth 3 -type f -printf '%P
+' | sort |             grep -Ei 'SDL|curl|ssl|http|net|freetype|png|jpeg|zlib|pthread|orbis/(Http|Ssl|Net|Pad)' || true
+
+      - name: Compile and link platform probe
+        run: |
+          set -euxo pipefail
+          cat > /tmp/probe.cpp <<'EOF'
+          #include <SDL2/SDL.h>
+          #include <orbis/Http.h>
+          #include <orbis/Net.h>
+          #include <orbis/Ssl.h>
+          #include <orbis/Pad.h>
+          #include <cstdio>
+          int main() {
+              SDL_version v{};
+              SDL_GetVersion(&v);
+              std::printf("SDL %u.%u.%u\n", v.major, v.minor, v.patch);
+              return 0;
+          }
+          EOF
+          clang++ --target=x86_64-pc-freebsd12-elf -fPIC -c -DORBIS -D_GNU_SOURCE             -isysroot "$OO_PS4_TOOLCHAIN"             -isystem "$OO_PS4_TOOLCHAIN/include"             -isystem "$OO_PS4_TOOLCHAIN/include/c++/v1"             -std=c++11 /tmp/probe.cpp -o /tmp/probe.o
+          ld.lld /tmp/probe.o -o /tmp/probe.elf -m elf_x86_64 -pie             --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr             -L"$OO_PS4_TOOLCHAIN/lib"             -lc -lkernel -lc++ -lSDL2 -lSceVideoOut -lSceAudioOut -lScePad             -lSceNet -lSceSsl -lSceHttp             "$OO_PS4_TOOLCHAIN/lib/crt1.o"
+          test -s /tmp/probe.elf
+          file /tmp/probe.elf || true
