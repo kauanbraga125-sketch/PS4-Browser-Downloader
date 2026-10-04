@@ -185,6 +185,25 @@ cd "$SRC/netsurf"
 cp "$ROOT/ports/netsurf/fetch_ps4.c" content/fetchers/ps4.c
 cp "$ROOT/ports/netsurf/fetch_ps4.h" content/fetchers/ps4.h
 
+# Duktape 2.7 has an Orbis branch, but it assumes the *_s time APIs.
+# OpenOrbis exposes the POSIX re-entrant *_r variants instead.
+python3 - <<'PY'
+from pathlib import Path
+p = Path("content/handlers/javascript/duktape/duk_config.h")
+s = p.read_text()
+old = """#if defined(DUK_F_ORBIS)
+/* --- Orbis (PS4) --- */
+#define DUK_USE_DATE_NOW_GETTIMEOFDAY
+#define DUK_USE_DATE_TZO_GMTIME_S"""
+new = """#if defined(DUK_F_ORBIS)
+/* --- Orbis (PS4) --- */
+#define DUK_USE_DATE_NOW_GETTIMEOFDAY
+#define DUK_USE_DATE_TZO_GMTIME_R"""
+if old not in s:
+    raise SystemExit("Duktape Orbis time block changed")
+p.write_text(s.replace(old, new))
+PY
+
 python3 - <<'PY'
 from pathlib import Path
 
