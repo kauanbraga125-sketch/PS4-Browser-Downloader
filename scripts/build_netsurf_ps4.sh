@@ -137,7 +137,7 @@ mkdir -p "$HOSTTOOLS"
 (
     cd "$SRC/nsgenbind"
     sed -i 's/-Werror//g' Makefile || true
-    make -j2 install         "PREFIX=$HOSTTOOLS"         "NSSHARED=$NSBUILD"         "NSBUILD=$NSBUILD"         "CC=cc"         "BUILD_CC=cc"         "AR=ar"         "FLEX=flex"         "BISON=bison"         Q= VQ=
+    make -j2 install         "PREFIX=$HOSTTOOLS"         "NSSHARED=$NSBUILD"         "CC=cc"         "BUILD_CC=cc"         "AR=ar"         "FLEX=flex"         "BISON=bison"         Q= VQ=
 )
 test -x "$HOSTTOOLS/bin/nsgenbind"
 export PATH="$HOSTTOOLS/bin:$PATH"
