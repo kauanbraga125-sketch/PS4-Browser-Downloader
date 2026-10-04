@@ -342,6 +342,46 @@ app.get("/shot-fast", async function(_req, res) {
   }
 });
 
+
+app.get("/api/pending-download", function(_req, res) {
+  if (!lastDownload || lastDownload.preparing || !lastDownload.handoff)
+    return res.status(204).end();
+  res.set("Cache-Control", "no-store");
+  res.type("text").send(lastDownload.handoff);
+});
+
+app.post("/api/ack-download", function(_req, res) {
+  lastDownload = null;
+  res.json({ ok: true });
+});
+
+app.get("/api/focus-info", async function(_req, res) {
+  const p = await ensurePage();
+  let editable = false;
+  try {
+    editable = await p.evaluate(function() {
+      var el = document.activeElement;
+      if (!el) return false;
+      var tag = String(el.tagName || "").toLowerCase();
+      var type = String(el.type || "").toLowerCase();
+      if (tag === "textarea") return true;
+      if (el.isContentEditable) return true;
+      if (tag !== "input") return false;
+      return ["button","submit","reset","checkbox","radio","file","image","hidden"].indexOf(type) < 0;
+    });
+  } catch (_) {}
+  res.type("text").send(editable ? "1" : "0");
+});
+
+app.post("/api/type-submit", async function(req, res) {
+  const p = await ensurePage();
+  try {
+    await p.keyboard.insertText(String((req.body && req.body.text) || ""));
+    await p.keyboard.press("Enter");
+  } catch (_) {}
+  res.json({ ok: true });
+});
+
 app.get("/api/state", async function(_req, res) {
   const p = await ensurePage();
   let title = "";
