@@ -38,6 +38,7 @@ fetch_repo netsurf-browser/libcss 499f1c4601ad39942fd1b2204053a387bec9b989 libcs
 fetch_repo netsurf-browser/libdom f69781e1f062444b5af3f62d431d7d94018da53b libdom
 fetch_repo netsurf-browser/libnsutils 0bd39060740b6163bd50875326654a722df97eb2 libnsutils
 fetch_repo netsurf-browser/libnsfb b701cdce7241c3747ccd78658a365db0983ebe24 libnsfb
+fetch_repo madler/zlib refs/tags/v1.3.1 zlib
 fetch_repo netsurf-browser/netsurf 39da3c3a40af4566d86500ff3052dfdc7f9a0378 netsurf
 
 cat > "$TOOLS/ps4-pkg-config" <<EOF
@@ -80,6 +81,28 @@ export PKGCONFIG="$TOOLS/ps4-pkg-config"
 COMMON_CFLAGS="-isysroot $OO_PS4_TOOLCHAIN -isystem $OO_PS4_TOOLCHAIN/include -I$PREFIX/include -I$ROOT/ports/compat -fPIC -DORBIS -D_GNU_SOURCE"
 COMMON_LDFLAGS="-L$PREFIX/lib -L$OO_PS4_TOOLCHAIN/lib"
 
+build_zlib() {
+    echo
+    echo "================ zlib ================"
+    cd "$SRC/zlib"
+    mkdir -p "$WORK/zlib-obj" "$PREFIX/include" "$PREFIX/lib"
+    local sources=(
+        adler32.c compress.c crc32.c deflate.c
+        gzclose.c gzlib.c gzread.c gzwrite.c
+        infback.c inffast.c inflate.c inftrees.c
+        trees.c uncompr.c zutil.c
+    )
+    local objects=()
+    for src in "${sources[@]}"; do
+        obj="$WORK/zlib-obj/${src%.c}.o"
+        "$TOOLS/ps4-gcc" -O2 -DZLIB_CONST -I"$SRC/zlib" -c "$src" -o "$obj"
+        objects+=("$obj")
+    done
+    llvm-ar-18 rcs "$PREFIX/lib/libz.a" "${objects[@]}"
+    cp zlib.h zconf.h "$PREFIX/include/"
+    test -s "$PREFIX/lib/libz.a"
+}
+
 build_lib() {
     local name="$1"
     echo
@@ -103,6 +126,8 @@ build_lib() {
 
     env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$COMMON_LDFLAGS" make -j2 install "${makeargs[@]}"
 }
+
+build_zlib
 
 build_lib libwapcaplet
 build_lib libparserutils
