@@ -1,0 +1,75 @@
+name: Build PS4 Loader Control
+
+on:
+  push:
+    branches: [ independent-engine-poc ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18 make curl tar python3
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+
+      - name: Download OpenOrbis v0.5.4
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-all-errors https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz -o toolchain.tar.gz
+          echo '3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526  toolchain.tar.gz' | sha256sum -c -
+          mkdir -p .openorbis
+          tar xzf toolchain.tar.gz -C .openorbis
+          LINK_X=$(find "$GITHUB_WORKSPACE/.openorbis" -type f -name link.x -print -quit)
+          echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
+
+      - name: Build loader control ELF
+        run: |
+          set -euxo pipefail
+          mkdir -p build/loader-control
+          cat > build/loader-control/control.c <<'EOF'
+          #include <SDL2/SDL.h>
+          int main(void) {
+              if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) return 1;
+              SDL_Window *w = SDL_CreateWindow("PS4 Loader Control", 0, 0, 1920, 1080, 0);
+              if (!w) return 2;
+              SDL_Surface *s = SDL_GetWindowSurface(w);
+              if (!s) return 3;
+              SDL_FillRect(s, 0, SDL_MapRGB(s->format, 20, 100, 180));
+              SDL_UpdateWindowSurface(w);
+              for (;;) {
+                  SDL_Event e;
+                  while (SDL_PollEvent(&e)) {
+                      if ((e.type == SDL_JOYBUTTONDOWN && e.jbutton.button == 1) ||
+                          (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) {
+                          SDL_Quit();
+                          return 0;
+                      }
+                  }
+                  SDL_Delay(16);
+              }
+          }
+          EOF
+          clang-18 --target=x86_64-pc-freebsd12-elf -fPIC -funwind-tables -c -DORBIS -D_GNU_SOURCE             -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include"             build/loader-control/control.c -o build/loader-control/control.o
+          ld.lld build/loader-control/control.o -o build/loader-control/control.elf -m elf_x86_64 -pie             --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr             -L"$OO_PS4_TOOLCHAIN/lib"             -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad             -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel             "$OO_PS4_TOOLCHAIN/lib/crt1.o"
+
+      - name: Package loader control
+        run: bash scripts/package_loader_control.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PS4-Loader-Control
+          path: |
+            PS4_Loader_Control_v1.0.pkg
+            PS4_Loader_Control_v1.0.pkg.sha256
+          retention-days: 30
