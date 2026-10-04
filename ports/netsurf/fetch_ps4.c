@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <orbis/Http.h>
 #include <orbis/Net.h>
@@ -266,6 +267,58 @@ static void ps4_emit_headers(struct ps4_http_ctx *ctx, char *headers, size_t len
     }
 }
 
+static bool ps4_find_location(const char *headers,
+                              size_t len,
+                              char *out,
+                              size_t out_cap)
+{
+    size_t start = 0;
+
+    if (out_cap == 0)
+        return false;
+    out[0] = '\0';
+
+    while (start < len) {
+        size_t end = start;
+        size_t value_start;
+        size_t value_end;
+
+        while (end < len && headers[end] != '\n')
+            end++;
+
+        if (end > start + 9 &&
+            strncasecmp(headers + start, "Location:", 9) == 0) {
+            value_start = start + 9;
+            while (value_start < end &&
+                   (headers[value_start] == ' ' ||
+                    headers[value_start] == '\t')) {
+                value_start++;
+            }
+
+            value_end = end;
+            while (value_end > value_start &&
+                   (headers[value_end - 1] == '\r' ||
+                    headers[value_end - 1] == '\n' ||
+                    headers[value_end - 1] == ' ' ||
+                    headers[value_end - 1] == '\t')) {
+                value_end--;
+            }
+
+            size_t n = value_end - value_start;
+            if (n >= out_cap)
+                n = out_cap - 1;
+
+            memcpy(out, headers + value_start, n);
+            out[n] = '\0';
+            return n > 0;
+        }
+
+        start = (end < len) ? end + 1 : end;
+    }
+
+    return false;
+}
+
 static bool ps4_apply_request_headers(int req, struct ps4_http_ctx *ctx)
 {
     if (ctx->headers == NULL)
@@ -401,9 +454,31 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     {
         char *all = NULL;
         size_t all_len = 0;
+        char location[2048];
+        bool have_location = false;
+
         ret = sceHttpGetAllResponseHeaders(req, &all, &all_len);
-        if (ret >= 0 && all != NULL && all_len > 0)
+        if (ret >= 0 && all != NULL && all_len > 0) {
             ps4_emit_headers(ctx, all, all_len);
+            have_location = ps4_find_location(all, all_len,
+                                              location, sizeof(location));
+        }
+
+        if ((status == 301 || status == 302 || status == 303 ||
+             status == 307 || status == 308) && have_location) {
+            fetch_msg msg;
+            msg.type = FETCH_REDIRECT;
+            msg.data.redirect = location;
+            ps4_send(ctx, &msg);
+            goto done;
+        }
+
+        if (status == 304) {
+            fetch_msg msg;
+            msg.type = FETCH_NOTMODIFIED;
+            ps4_send(ctx, &msg);
+            goto done;
+        }
     }
 
     if (ctx->aborted)
