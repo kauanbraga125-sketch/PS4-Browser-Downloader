@@ -348,12 +348,18 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         event->type = (in.type == SDL_JOYBUTTONDOWN) ?
             NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP;
 
-        if (in.jbutton.button == 0) {
+        /*
+         * Real-hardware testing on the target PS4 shows SDL-PS4 exposes
+         * Circle as joystick button 0 and Cross (X) as button 1.
+         * Browser convention for this port is X = activate/click and
+         * Circle = back, so map the physical buttons accordingly.
+         */
+        if (in.jbutton.button == 1) {
             event->value.keycode = NSFB_KEY_MOUSE_1;
             return true;
         }
 
-        if (in.jbutton.button == 1) {
+        if (in.jbutton.button == 0) {
             event->value.keycode = NSFB_KEY_ESCAPE;
             return true;
         }
