@@ -348,7 +348,6 @@ s = s.replace(
     '\t/* common initialisation */\n\tret = netsurf_init(NULL);'
 )
 
-s = s.replace(
 # PS4 bootstrap mode: render the document before optional remote assets.
 # This keeps the first independent-browser milestone deterministic.
 s = s.replace(
@@ -360,10 +359,6 @@ s = s.replace(
     "\tnsoption_set_bool(animate_images, false);\n"
     "#endif\n\n"
     "\t/* Override, since we have no support for non-core SELECT menu */"
-)
-
-    '\t/* Override, since we have no support for non-core SELECT menu */',
-    '\t/* Override, since we have no support for non-core SELECT menu */'
 )
 
 s = s.replace(
