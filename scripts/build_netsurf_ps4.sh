@@ -95,7 +95,7 @@ build_zlib() {
     local objects=()
     for src in "${sources[@]}"; do
         obj="$WORK/zlib-obj/${src%.c}.o"
-        "$TOOLS/ps4-gcc" -O2 -DZLIB_CONST -Dlseek=sceKernelLseek -include orbis/libkernel.h -I"$SRC/zlib" -c "$src" -o "$obj"
+        "$TOOLS/ps4-gcc" -O2 -DZLIB_CONST -Dlseek=sceKernelLseek -Dread=sceKernelRead -Dwrite=sceKernelWrite -Dclose=sceKernelClose -include orbis/libkernel.h -I"$SRC/zlib" -c "$src" -o "$obj"
         objects+=("$obj")
     done
     llvm-ar-18 rcs "$PREFIX/lib/libz.a" "${objects[@]}"
