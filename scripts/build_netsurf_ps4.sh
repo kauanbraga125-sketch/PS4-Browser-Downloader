@@ -79,7 +79,7 @@ ln -sf ps4-g++ "$TOOLS/$HOST-g++"
 export PKG_CONFIG="$TOOLS/ps4-pkg-config"
 export PKGCONFIG="$TOOLS/ps4-pkg-config"
 
-COMMON_CFLAGS="-isysroot $OO_PS4_TOOLCHAIN -isystem $OO_PS4_TOOLCHAIN/include -I$PREFIX/include -I$ROOT/ports/compat -fPIC -DORBIS -D_GNU_SOURCE"
+COMMON_CFLAGS="-isysroot $OO_PS4_TOOLCHAIN -isystem $OO_PS4_TOOLCHAIN/include -I$PREFIX/include -I$ROOT/ports/compat -fPIC -DORBIS -D__ORBIS__ -D_GNU_SOURCE"
 COMMON_LDFLAGS="-L$PREFIX/lib -L$OO_PS4_TOOLCHAIN/lib"
 
 build_zlib() {
