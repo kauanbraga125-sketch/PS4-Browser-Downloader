@@ -542,8 +542,11 @@ render:
 #endif
 
 '''
+netdiag_anchor = """static int
+fb_url_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{"""
 if "ps4_network_test_page" not in s:
-    s = s.replace(ime_anchor, netdiag_code + "\n" + ime_anchor)
+    s = s.replace(netdiag_anchor, netdiag_code + "\n" + netdiag_anchor)
 
 
 # PS4-native URL keyboard. The framebuffer OSK is unsuitable for a TV/controller.
