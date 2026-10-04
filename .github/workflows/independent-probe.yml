@@ -60,7 +60,7 @@ jobs:
           }
           EOF
           clang++ --target=x86_64-pc-freebsd12-elf -fPIC -c -DORBIS -D_GNU_SOURCE -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include" -isystem "$OO_PS4_TOOLCHAIN/include/c++/v1" -std=c++11 /tmp/probe.cpp -o /tmp/probe.o
-          ld.lld /tmp/probe.o -o /tmp/probe.elf -m elf_x86_64 -pie --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr -L"$OO_PS4_TOOLCHAIN/lib" -lc -lkernel -lc++ -lSDL2 -lSceVideoOut -lSceAudioOut -lScePad -lSceNet -lSceSsl -lSceHttp "$OO_PS4_TOOLCHAIN/lib/crt1.o"
+          ld.lld /tmp/probe.o -o /tmp/probe.elf -m elf_x86_64 -pie --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr -L"$OO_PS4_TOOLCHAIN/lib" -lc -lkernel -lc++ -lSDL2 -lSceVideoOut -lSceAudioOut -lScePad -lSceUserService -lSceNet -lSceSsl -lSceHttp "$OO_PS4_TOOLCHAIN/lib/crt1.o"
           test -s /tmp/probe.elf
           file /tmp/probe.elf || true
 
