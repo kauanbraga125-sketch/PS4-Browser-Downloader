@@ -287,7 +287,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.8.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1337,7 +1337,7 @@ static bool http_get_bytes_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.8.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1424,7 +1424,7 @@ static bool http_post_json_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.8.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -2224,6 +2224,7 @@ struct GpuRenderer {
     GLint uSampler = -1;
     int texW = 0;
     int texH = 0;
+    std::string error;
 };
 
 static PbdlShaderBlob* find_precompiled_shader(const char* name) {
@@ -2236,44 +2237,82 @@ static PbdlShaderBlob* find_precompiled_shader(const char* name) {
 
 static bool gpu_load_modules(GpuRenderer& g) {
     const char* word = sceKernelGetFsSandboxRandomWord();
-    if (!word) return false;
+    if (!word) {
+        g.error = "sandbox path indisponivel";
+        return false;
+    }
     const std::string prefix = std::string("/") + word + "/common/lib/";
 
     int mstart = 0;
     g.piglet = static_cast<int32_t>(sceKernelLoadStartModule(
         (prefix + "libScePigletv2VSH.sprx").c_str(),
         0, nullptr, 0, nullptr, &mstart));
-    if (g.piglet < 0) return false;
+    if (g.piglet < 0) {
+        g.error = "load Piglet " + hex32(g.piglet);
+        return false;
+    }
 
     g.precompiled = static_cast<int32_t>(sceKernelLoadStartModule(
         (prefix + "libScePrecompiledShaders.sprx").c_str(),
         0, nullptr, 0, nullptr, &mstart));
-    return g.precompiled >= 0;
+    if (g.precompiled < 0) {
+        g.error = "load PrecompiledShaders " + hex32(g.precompiled);
+        return false;
+    }
+    return true;
 }
 
 static bool gpu_init_context(GpuRenderer& g) {
     OrbisPglConfig cfg{};
+    std::memset(&cfg, 0, sizeof(cfg));
     cfg.size = sizeof(cfg);
     cfg.flags = ORBIS_PGL_FLAGS_USE_COMPOSITE_EXT |
                 ORBIS_PGL_FLAGS_USE_FLEXIBLE_MEMORY | 0x60;
     cfg.processOrder = 1;
-    cfg.systemSharedMemorySize = 250ULL * 1024ULL * 1024ULL;
-    cfg.videoSharedMemorySize = 512ULL * 1024ULL * 1024ULL;
-    cfg.maxMappedFlexibleMemory = 170ULL * 1024ULL * 1024ULL;
-    cfg.drawCommandBufferSize = 1ULL * 1024ULL * 1024ULL;
-    cfg.lcueResourceBufferSize = 1ULL * 1024ULL * 1024ULL;
+    cfg.systemSharedMemorySize = 250 * 1024 * 1024;
+    cfg.videoSharedMemorySize = 512 * 1024 * 1024;
+    cfg.maxMappedFlexibleMemory = 170 * 1024 * 1024;
+    cfg.drawCommandBufferSize = 1 * 1024 * 1024;
+    cfg.lcueResourceBufferSize = 1 * 1024 * 1024;
     cfg.dbgPosCmd_0x40 = SCREEN_W;
     cfg.dbgPosCmd_0x44 = SCREEN_H;
+    cfg.dbgPosCmd_0x48 = 0;
+    cfg.dbgPosCmd_0x4C = 0;
     cfg.unk_0x5C = 2;
 
-    if (!scePigletSetConfigurationVSH(&cfg)) return false;
+    if (!scePigletSetConfigurationVSH(&cfg)) {
+        g.error = "scePigletSetConfigurationVSH";
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
 
     g.display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (g.display == EGL_NO_DISPLAY) return false;
+    if (g.display == EGL_NO_DISPLAY) {
+        g.error = "eglGetDisplay " + hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
 
-    EGLint major = 0, minor = 0;
-    if (!eglInitialize(g.display, &major, &minor)) return false;
-    if (!eglBindAPI(EGL_OPENGL_ES_API)) return false;
+    EGLint major = -1, minor = -1;
+    if (!eglInitialize(g.display, &major, &minor)) {
+        g.error = "eglInitialize " + hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
+
+    if (!eglBindAPI(EGL_OPENGL_ES_API)) {
+        g.error = "eglBindAPI " + hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
+
+    // Match the official OpenOrbis Piglet sample exactly. On PS4 this is
+    // requested before config/surface creation.
+    if (!eglSwapInterval(g.display, 0)) {
+        g.error = "eglSwapInterval(0) " + hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
 
     const EGLint attribs[] = {
         EGL_RED_SIZE, 8,
@@ -2288,34 +2327,64 @@ static bool gpu_init_context(GpuRenderer& g) {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_NONE
     };
+
     EGLConfig config{};
     EGLint numConfigs = 0;
-    if (!eglChooseConfig(g.display, attribs, &config, 1, &numConfigs) ||
-        numConfigs < 1) return false;
+    if (!eglChooseConfig(g.display, attribs, &config, 1, &numConfigs)) {
+        g.error = "eglChooseConfig " + hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
+    if (numConfigs < 1) {
+        g.error = "eglChooseConfig: 0 configs";
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
 
-    OrbisPglWindow window{0,
+    OrbisPglWindow window{
+        0,
         static_cast<khronos_uint32_t>(SCREEN_W),
-        static_cast<khronos_uint32_t>(SCREEN_H), 0};
-    const EGLint windowAttribs[] = {
-        EGL_RENDER_BUFFER, EGL_BACK_BUFFER, EGL_NONE
+        static_cast<khronos_uint32_t>(SCREEN_H)
     };
+
+    const EGLint windowAttribs[] = {
+        EGL_RENDER_BUFFER, EGL_BACK_BUFFER,
+        EGL_NONE
+    };
+
     g.surface = eglCreateWindowSurface(
         g.display, config, &window, windowAttribs);
-    if (g.surface == EGL_NO_SURFACE) return false;
+    if (g.surface == EGL_NO_SURFACE) {
+        g.error = "eglCreateWindowSurface " +
+                  hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
 
     const EGLint contextAttribs[] = {
-        EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE
+        EGL_CONTEXT_CLIENT_VERSION, 2,
+        EGL_NONE
     };
+
     g.context = eglCreateContext(
         g.display, config, EGL_NO_CONTEXT, contextAttribs);
-    if (g.context == EGL_NO_CONTEXT) return false;
-
-    if (!eglMakeCurrent(g.display, g.surface, g.surface, g.context))
+    if (g.context == EGL_NO_CONTEXT) {
+        g.error = "eglCreateContext " +
+                  hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
         return false;
+    }
 
-    // Prefer display-synchronised 60 Hz. If unsupported Piglet simply
-    // keeps the current swap interval.
-    (void)eglSwapInterval(g.display, 1);
+    if (!eglMakeCurrent(g.display, g.surface, g.surface, g.context)) {
+        g.error = "eglMakeCurrent " +
+                  hex32(static_cast<uint32_t>(eglGetError()));
+        append_diag("EGL_FAIL", g.error);
+        return false;
+    }
+
+    append_diag("EGL_OK",
+                "version=" + std::to_string(major) + "." +
+                std::to_string(minor));
     return true;
 }
 
@@ -2375,16 +2444,18 @@ static bool gpu_init_program(GpuRenderer& g) {
 }
 
 static bool gpu_init(GpuRenderer& g) {
+    g.error.clear();
     if (!gpu_load_modules(g)) {
-        notify_user("Hybrid GPU: falha carregando Piglet.");
+        append_diag("GPU_INIT_FAIL", g.error);
         return false;
     }
     if (!gpu_init_context(g)) {
-        notify_user("Hybrid GPU: falha criando contexto EGL.");
+        append_diag("GPU_INIT_FAIL", g.error);
         return false;
     }
     if (!gpu_init_program(g)) {
-        notify_user("Hybrid GPU: falha preparando shader/textura.");
+        if (g.error.empty()) g.error = "shader/textura";
+        append_diag("GPU_INIT_FAIL", g.error);
         return false;
     }
     return true;
@@ -2531,6 +2602,192 @@ static int open_native_pad() {
     return scePadOpen(user, ORBIS_PAD_PORT_TYPE_STANDARD, 0, nullptr);
 }
 
+static int run_sdl_compat(const std::string& backend) {
+    notify_user("Hybrid: GPU indisponivel. Entrando no modo SDL compativel.");
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        notify_user(std::string("Hybrid SDL: init falhou - ") + SDL_GetError());
+        return -1;
+    }
+
+    SDL_Window* window = SDL_CreateWindow(
+        "PS4 Hybrid Browser v7.8.1 SDL fallback",
+        SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+        SCREEN_W, SCREEN_H, 0);
+    if (!window) {
+        notify_user(std::string("Hybrid SDL: janela falhou - ") + SDL_GetError());
+        SDL_Quit();
+        return -1;
+    }
+
+    SDL_Surface* screen = SDL_GetWindowSurface(window);
+    SDL_Surface* frame = SDL_CreateRGBSurface(
+        0, SCREEN_W, SCREEN_H, 32,
+        0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000);
+
+    if (!screen || !frame) {
+        notify_user("Hybrid SDL: framebuffer falhou");
+        if (frame) SDL_FreeSurface(frame);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
+    SDL_FillRect(frame, nullptr, SDL_MapRGB(frame->format, 28, 28, 28));
+    SDL_BlitSurface(frame, nullptr, screen, nullptr);
+    SDL_UpdateWindowSurface(window);
+
+    FrameWorker frameWorker;
+    if (!start_frame_worker(frameWorker, backend)) {
+        notify_user("Hybrid SDL: stream nao iniciou");
+        SDL_FreeSurface(frame);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
+    DownloadWorker downloadWorker;
+    const bool downloadWorkerStarted =
+        start_download_worker(downloadWorker, backend);
+
+    ControlWorker controlWorker;
+    const bool controlWorkerStarted =
+        start_control_worker(controlWorker, backend);
+
+    const int pad = open_native_pad();
+    if (pad < 0) {
+        if (controlWorkerStarted) stop_control_worker(controlWorker);
+        if (downloadWorkerStarted) stop_download_worker(downloadWorker);
+        stop_frame_worker(frameWorker);
+        SDL_FreeSurface(frame);
+        SDL_DestroyWindow(window);
+        SDL_Quit();
+        return -1;
+    }
+
+    float cursorXF = SCREEN_W * 0.5f;
+    float cursorYF = SCREEN_H * 0.5f;
+    int oldCursorX = static_cast<int>(cursorXF);
+    int oldCursorY = static_cast<int>(cursorYF);
+    uint32_t oldButtons = 0;
+    uint64_t lastUs = sceKernelGetProcessTime();
+    uint64_t seenGeneration = 0;
+    bool fullRedraw = true;
+
+    notify_user("Hybrid SDL fallback: navegador ativo. O log /data/PBDL/navigation.log tem o erro EGL.");
+
+    for (;;) {
+        const uint64_t loopStartUs = sceKernelGetProcessTime();
+        float dt = static_cast<float>(loopStartUs - lastUs) / 1000000.0f;
+        lastUs = loopStartUs;
+        if (dt < 0.0f) dt = 0.0f;
+        if (dt > 0.025f) dt = 0.025f;
+
+        stbi_uc* pixels = nullptr;
+        int w = 0, h = 0;
+        if (take_latest_frame(frameWorker, seenGeneration, pixels, w, h)) {
+            SDL_Surface* srcSurface = SDL_CreateRGBSurfaceFrom(
+                pixels, w, h, 32, w * 4,
+                0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
+            if (srcSurface) {
+                SDL_Rect dst{0,0,SCREEN_W,SCREEN_H};
+                SDL_BlitScaled(srcSurface, nullptr, frame, &dst);
+                SDL_FreeSurface(srcSurface);
+                fullRedraw = true;
+            }
+            stbi_image_free(pixels);
+        }
+
+        OrbisPadData pd{};
+        if (scePadReadState(pad, &pd) >= 0) {
+            const uint32_t pressed = pd.buttons & ~oldButtons;
+            oldButtons = pd.buttons;
+
+            cursorXF += cursor_axis_velocity(pd.leftStick.x) * dt;
+            cursorYF += cursor_axis_velocity(pd.leftStick.y) * dt;
+            cursorXF = std::max(0.0f, std::min(static_cast<float>(SCREEN_W - 1), cursorXF));
+            cursorYF = std::max(0.0f, std::min(static_cast<float>(SCREEN_H - 1), cursorYF));
+
+            const int cx = static_cast<int>(cursorXF + 0.5f);
+            const int cy = static_cast<int>(cursorYF + 0.5f);
+            const int bx = cx * 1280 / SCREEN_W;
+            const int by = cy * 720 / SCREEN_H;
+
+            if (pressed & ORBIS_PAD_BUTTON_CROSS) {
+                if (backend_api(backend, "/api/click",
+                    "{\"x\":" + std::to_string(bx) +
+                    ",\"y\":" + std::to_string(by) + "}")) {
+                    if (backend_focus_is_editable(backend)) {
+                        std::string text;
+                        if (open_url_ime(text))
+                            backend_api(backend, "/api/type-submit",
+                                "{\"text\":\"" + json_escape(text) + "\"}");
+                    }
+                }
+            }
+
+            if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
+                (pressed & ORBIS_PAD_BUTTON_L1)) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/back");
+                else backend_api(backend, "/api/back");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_R1) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/forward");
+                else backend_api(backend, "/api/forward");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_SQUARE) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/reload");
+                else backend_api(backend, "/api/reload");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_UP) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/scroll", "{\"y\":-500}");
+                else backend_api(backend, "/api/scroll", "{\"y\":-500}");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_DOWN) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/scroll", "{\"y\":500}");
+                else backend_api(backend, "/api/scroll", "{\"y\":500}");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_R2) {
+                std::string text;
+                if (open_url_ime(text))
+                    backend_api(backend, "/api/nav",
+                        "{\"url\":\"" + json_escape(text) + "\"}");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_L2) {
+                if (controlWorkerStarted) queue_control(controlWorker, "/api/home");
+                else backend_api(backend, "/api/home");
+            }
+            if (pressed & ORBIS_PAD_BUTTON_OPTIONS)
+                break;
+
+            if (fullRedraw) {
+                SDL_BlitSurface(frame, nullptr, screen, nullptr);
+                draw_cursor(screen, cx, cy);
+                SDL_UpdateWindowSurface(window);
+                fullRedraw = false;
+            } else if (cx != oldCursorX || cy != oldCursorY) {
+                present_cursor_only(window, frame, screen,
+                                    oldCursorX, oldCursorY, cx, cy);
+            }
+
+            oldCursorX = cx;
+            oldCursorY = cy;
+        }
+
+        const uint64_t elapsed = sceKernelGetProcessTime() - loopStartUs;
+        if (elapsed < 16667) usleep(static_cast<useconds_t>(16667 - elapsed));
+    }
+
+    scePadClose(pad);
+    if (controlWorkerStarted) stop_control_worker(controlWorker);
+    if (downloadWorkerStarted) stop_download_worker(downloadWorker);
+    stop_frame_worker(frameWorker);
+    SDL_FreeSurface(frame);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
+
 } // namespace
 
 int main() {
@@ -2538,7 +2795,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.8 native jpeg");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.8.1 EGL compat");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -2556,7 +2813,11 @@ int main() {
 
     GpuRenderer gpu;
     if (!gpu_init(gpu)) {
-        sleep(4);
+        const std::string why = gpu.error.empty() ? "desconhecido" : gpu.error;
+        notify_user("Hybrid GPU falhou: " + why + ". Usando SDL.");
+        append_diag("GPU_FALLBACK", why);
+        gpu_shutdown(gpu);
+        (void)run_sdl_compat(backend);
         clean_exit_to_shell();
     }
 
@@ -2583,7 +2844,7 @@ int main() {
         clean_exit_to_shell();
     }
 
-    notify_user("Hybrid v7.8 NATIVE JPEG: X clicar | O voltar | R2 URL | L2 Google | Options sair");
+    notify_user("Hybrid v7.8.1 GPU: X clicar | O voltar | R2 URL | L2 Google | Options sair");
 
     float cursorX = SCREEN_W * 0.5f;
     float cursorY = SCREEN_H * 0.5f;
