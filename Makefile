@@ -1,5 +1,5 @@
-TITLE       := PS4 Hybrid Browser v7.4
-VERSION     := 07.40
+TITLE       := PS4 Hybrid Browser v7.5
+VERSION     := 07.50
 TITLE_ID    := PBDL00001
 CONTENT_ID  := IV0000-PBDL00001_00-PS4BROWSERDL0001
 

@@ -270,7 +270,7 @@ app.get("/ps4", function(req, res) {
   });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.4.0" });
+  res.json({ ok: true, version: "7.5.0" });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -279,6 +279,24 @@ app.get("/shot", async function(_req, res) {
     res.set("Cache-Control", "no-store, no-cache, must-revalidate");
     res.type("png").send(png);
   } catch (e) {
+    res.status(500).send(String(e.message || e));
+  }
+});
+
+app.get("/shot-fast", async function(_req, res) {
+  try {
+    const p = await ensurePage();
+    const jpg = await p.screenshot({
+      type: "jpeg",
+      quality: 45,
+      animations: "disabled"
+    });
+    res.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.type("jpeg").send(jpg);
+  } catch (e) {
+    // Recreate the page on the next request if Chromium/page died.
+    try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
+    page = null;
     res.status(500).send(String(e.message || e));
   }
 });
@@ -428,6 +446,20 @@ app.post("/api/forward", async function(_req, res) {
 app.post("/api/reload", async function(_req, res) {
   const p = await ensurePage();
   try { await p.reload({ waitUntil: "domcontentloaded", timeout: 20000 }); } catch (_) {}
+  res.json({ ok: true });
+});
+
+app.post("/api/home", async function(_req, res) {
+  const p = await ensurePage();
+  try {
+    await p.goto("https://www.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 25000
+    });
+    lastMessage = "Google";
+  } catch (e) {
+    lastMessage = "Falha voltando ao Google: " + String(e.message || e);
+  }
   res.json({ ok: true });
 });
 app.post("/api/click", async function(req, res) {
