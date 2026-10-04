@@ -23,7 +23,7 @@ CPPFILES := $(wildcard $(PROJDIR)/*.cpp)
 OBJS     := $(patsubst $(PROJDIR)/%.cpp,$(INTDIR)/%.o,$(CPPFILES))
 MODULE_DATA := $(TOOLCHAIN)/src/modules
 PACKAGE_FILES := eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png \
-                 sce_module/libSceFios2.prx sce_module/libc.prx daemon/daemon.elf
+                 sce_module/libSceFios2.prx sce_module/libc.prx daemon.elf
 
 .PHONY: all clean
 all: $(CONTENT_ID).pkg
@@ -68,7 +68,7 @@ sce_sys/param.sfo: Makefile
 	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ TITLE_ID --type Utf8 --maxsize 12 --value '$(TITLE_ID)'
 	$(TOOLCHAIN)/bin/$(CDIR)/PkgTool.Core sfo_setentry $@ VERSION --type Utf8 --maxsize 8 --value '$(VERSION)'
 
-pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png sce_module/libSceFios2.prx sce_module/libc.prx daemon/daemon.elf
+pkg.gp4: eboot.bin sce_sys/about/right.sprx sce_sys/param.sfo sce_sys/icon0.png sce_module/libSceFios2.prx sce_module/libc.prx daemon.elf
 	$(TOOLCHAIN)/bin/$(CDIR)/create-gp4 -out $@ --content-id=$(CONTENT_ID) --files "$(PACKAGE_FILES)"
 
 $(CONTENT_ID).pkg: pkg.gp4

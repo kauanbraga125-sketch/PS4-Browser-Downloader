@@ -637,7 +637,7 @@ static bool port_open(uint16_t port) {
 static bool start_download_daemon() {
     if (port_open(6701)) return true;
 
-    int filefd = open("/app0/daemon/daemon.elf", O_RDONLY);
+    int filefd = open("/app0/daemon.elf", O_RDONLY);
     if (filefd < 0) {
         g_status = "daemon.elf nao encontrado";
         return false;
