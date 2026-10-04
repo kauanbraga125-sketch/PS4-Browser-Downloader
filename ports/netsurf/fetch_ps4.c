@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -41,6 +42,7 @@
 #define PS4_HTTP_POOL_SIZE  (512 * 1024)
 #define PS4_SSL_POOL_SIZE   (512 * 1024)
 #define PS4_READ_CHUNK      (64 * 1024)
+#define PS4_HTTP_TIMEOUT_US  (10 * 1000 * 1000)
 #define PS4_USER_AGENT      "Mozilla/5.0 (PlayStation 4; NetSurf PS4) NetSurf/PS4"
 
 struct ps4_http_ctx {
@@ -57,6 +59,8 @@ static struct ps4_http_ctx *ps4_ring;
 static int g_net_pool = -1;
 static int g_ssl = -1;
 static int g_http = -1;
+static int g_transport_stage = 0;
+static int g_transport_error = 0;
 
 static void ps4_send(struct ps4_http_ctx *ctx, const fetch_msg *msg)
 {
@@ -71,6 +75,16 @@ static void ps4_send_error(struct ps4_http_ctx *ctx, const char *message)
     msg.type = FETCH_ERROR;
     msg.data.error = message;
     ps4_send(ctx, &msg);
+}
+
+static void ps4_send_error_code(struct ps4_http_ctx *ctx,
+                                const char *stage,
+                                int code)
+{
+    char message[128];
+    snprintf(message, sizeof(message), "PS4 %s: 0x%08x",
+             stage, (unsigned)code);
+    ps4_send_error(ctx, message);
 }
 
 static bool ps4_transport_init(void)
@@ -95,24 +109,32 @@ static bool ps4_transport_init(void)
               (unsigned)ret);
     }
 
+    g_transport_stage = 1;
     g_net_pool = sceNetPoolCreate("netsurf-ps4", PS4_NET_POOL_SIZE, 0);
     if (g_net_pool < 0) {
+        g_transport_error = g_net_pool;
         NSLOG(fetch, ERROR, "sceNetPoolCreate failed: 0x%08x", (unsigned)g_net_pool);
         return false;
     }
 
+    g_transport_stage = 2;
     g_ssl = sceSslInit(PS4_SSL_POOL_SIZE);
     if (g_ssl < 0) {
+        g_transport_error = g_ssl;
         NSLOG(fetch, ERROR, "sceSslInit failed: 0x%08x", (unsigned)g_ssl);
         return false;
     }
 
+    g_transport_stage = 3;
     g_http = sceHttpInit(g_net_pool, g_ssl, PS4_HTTP_POOL_SIZE);
     if (g_http < 0) {
+        g_transport_error = g_http;
         NSLOG(fetch, ERROR, "sceHttpInit failed: 0x%08x", (unsigned)g_http);
         return false;
     }
 
+    g_transport_stage = 0;
+    g_transport_error = 0;
     NSLOG(fetch, INFO, "PS4 native HTTP transport initialised");
     return true;
 }
@@ -288,16 +310,28 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     uint8_t *buf = NULL;
 
     if (g_http < 0 && !ps4_transport_init()) {
-        ps4_send_error(ctx, "PS4: native HTTP transport init failed");
+        char init_error[128];
+        snprintf(init_error, sizeof(init_error),
+                 "PS4 HTTP init stage %d: 0x%08x",
+                 g_transport_stage, (unsigned)g_transport_error);
+        ps4_send_error(ctx, init_error);
         goto done;
     }
 
     tpl = sceHttpCreateTemplate(g_http, PS4_USER_AGENT,
                                 ORBIS_HTTP_VERSION_1_1, 1);
     if (tpl < 0) {
-        ps4_send_error(ctx, "PS4: failed to create HTTP template");
+        ps4_send_error_code(ctx, "sceHttpCreateTemplate", tpl);
         goto done;
     }
+
+    /*
+     * Never leave the framebuffer frontend apparently frozen forever.
+     * These are transport-level limits; HTTPS verification remains enabled.
+     */
+    (void)sceHttpSetResolveTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
+    (void)sceHttpSetConnectTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
+    (void)sceHttpSetSendTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
 
     /*
      * IMPORTANT: deliberately no sceHttpsSetSslCallback() and no
@@ -309,7 +343,7 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     if (conn < 0) {
         NSLOG(fetch, ERROR, "sceHttpCreateConnectionWithURL: 0x%08x",
               (unsigned)conn);
-        ps4_send_error(ctx, "PS4: connection creation failed");
+        ps4_send_error_code(ctx, "sceHttpCreateConnectionWithURL", conn);
         goto done;
     }
 
@@ -317,7 +351,7 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     if (req < 0) {
         NSLOG(fetch, ERROR, "sceHttpCreateRequestWithURL: 0x%08x",
               (unsigned)req);
-        ps4_send_error(ctx, "PS4: request creation failed");
+        ps4_send_error_code(ctx, "sceHttpCreateRequestWithURL", req);
         goto done;
     }
 
@@ -333,13 +367,13 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         NSLOG(fetch, ERROR,
               "sceHttpSendRequest failed: 0x%08x errno=0x%08x",
               (unsigned)ret, (unsigned)last_errno);
-        ps4_send_error(ctx, "PS4: HTTP/TLS request failed");
+        ps4_send_error_code(ctx, "sceHttpSendRequest", ret);
         goto done;
     }
 
     ret = sceHttpGetStatusCode(req, &status);
     if (ret < 0) {
-        ps4_send_error(ctx, "PS4: failed to read HTTP status");
+        ps4_send_error_code(ctx, "sceHttpGetStatusCode", ret);
         goto done;
     }
     fetch_set_http_code(ctx->parent, status);
@@ -369,7 +403,7 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
             NSLOG(fetch, ERROR,
                   "sceHttpReadData failed: 0x%08x errno=0x%08x",
                   (unsigned)ret, (unsigned)last_errno);
-            ps4_send_error(ctx, "PS4: response read failed");
+            ps4_send_error_code(ctx, "sceHttpReadData", ret);
             goto done;
         }
         if (ret == 0)
