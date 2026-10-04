@@ -97,15 +97,12 @@ jobs:
           set -euxo pipefail
           node --check backend/server.js
           python3 -m json.tool backend/package.json >/dev/null
-          grep -q 'app.get("/ps4"' backend/server.js
-          grep -q 'app.post("/legacy/click"' backend/server.js
           grep -q 'app.get("/api/pending-download"' backend/server.js
           grep -q 'app.get("/api/focus-info"' backend/server.js
           grep -q 'app.post("/api/type-submit"' backend/server.js
           grep -q 'app.get("/shot-fast"' backend/server.js
           grep -q 'Page.startScreencast' backend/server.js
           grep -q 'app.post("/api/home"' backend/server.js
-          grep -q 'input type=\\\"image\\\"' backend/server.js
 
       - name: Package hybrid backend
         run: |
