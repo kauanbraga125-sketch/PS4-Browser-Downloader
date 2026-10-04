@@ -11,8 +11,7 @@
  * Current limitations (deliberate for the first proof):
  *   - synchronous request execution inside fetcher poll()
  *   - no POST/multipart/auth UI yet
- *   - redirects rely on the sceHttp template default until explicit redirect
- *     handling is added and verified on hardware.
+ *   - redirects are returned to NetSurf (including relative locations).
  *
  * SPDX-License-Identifier: GPL-2.0-only
  */
@@ -28,6 +27,7 @@
 #include <orbis/Net.h>
 #include <orbis/Ssl.h>
 #include <orbis/Sysmodule.h>
+#include <orbis/libkernel.h>
 
 #include <libwapcaplet/libwapcaplet.h>
 
@@ -44,6 +44,7 @@
 #define PS4_SSL_POOL_SIZE   (1024 * 1024)
 #define PS4_READ_CHUNK      (64 * 1024)
 #define PS4_HTTP_TIMEOUT_US  (10 * 1000 * 1000)
+#define PS4_TOTAL_TIMEOUT_US (30ULL * 1000 * 1000)
 #define PS4_USER_AGENT      "Mozilla/5.0 (PlayStation 4; NetSurf PS4) NetSurf/PS4"
 
 struct ps4_http_ctx {
@@ -52,6 +53,7 @@ struct ps4_http_ctx {
     char **headers;
     bool aborted;
     bool locked;
+    bool started;
     struct ps4_http_ctx *r_next;
     struct ps4_http_ctx *r_prev;
 };
@@ -73,6 +75,7 @@ static void ps4_send(struct ps4_http_ctx *ctx, const fetch_msg *msg)
 static void ps4_send_error(struct ps4_http_ctx *ctx, const char *message)
 {
     fetch_msg msg;
+    fprintf(stderr, "HTTP ERROR %s: %s\n", nsurl_access(ctx->url), message);
     msg.type = FETCH_ERROR;
     msg.data.error = message;
     ps4_send(ctx, &msg);
@@ -87,6 +90,8 @@ static void ps4_send_error_code(struct ps4_http_ctx *ctx,
              stage, (unsigned)code);
     ps4_send_error(ctx, message);
 }
+
+static void ps4_transport_fini(void);
 
 static bool ps4_transport_init(void)
 {
@@ -123,6 +128,7 @@ static bool ps4_transport_init(void)
     if (g_ssl < 0) {
         g_transport_error = g_ssl;
         NSLOG(fetch, ERROR, "sceSslInit failed: 0x%08x", (unsigned)g_ssl);
+        ps4_transport_fini();
         return false;
     }
 
@@ -131,6 +137,7 @@ static bool ps4_transport_init(void)
     if (g_http < 0) {
         g_transport_error = g_http;
         NSLOG(fetch, ERROR, "sceHttpInit failed: 0x%08x", (unsigned)g_http);
+        ps4_transport_fini();
         return false;
     }
 
@@ -144,16 +151,16 @@ static void ps4_transport_fini(void)
 {
     if (g_http >= 0) {
         sceHttpTerm(g_http);
-        g_http = -1;
     }
+    g_http = -1;
     if (g_ssl >= 0) {
         sceSslTerm(g_ssl);
-        g_ssl = -1;
     }
+    g_ssl = -1;
     if (g_net_pool >= 0) {
         sceNetPoolDestroy(g_net_pool);
-        g_net_pool = -1;
     }
+    g_net_pool = -1;
 }
 
 static bool ps4_initialise(lwc_string *scheme)
@@ -185,10 +192,9 @@ static void *ps4_setup(struct fetch *parent_fetch,
 
     (void)only_2xx;
     (void)downgrade_tls;
-    (void)post_multipart;
 
     /* First milestone is GET navigation. Do not silently turn a POST into GET. */
-    if (post_urlenc != NULL)
+    if (post_urlenc != NULL || post_multipart != NULL)
         return NULL;
 
     ctx = calloc(1, sizeof(*ctx));
@@ -225,7 +231,8 @@ static void *ps4_setup(struct fetch *parent_fetch,
 
 static bool ps4_start(void *vctx)
 {
-    (void)vctx;
+    struct ps4_http_ctx *ctx = vctx;
+    ctx->started = true;
     return true;
 }
 
@@ -361,6 +368,9 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     int status = 0;
     const char *url = nsurl_access(ctx->url);
     uint8_t *buf = NULL;
+    const uint64_t started_at = sceKernelGetProcessTime();
+
+    fprintf(stderr, "HTTP GET %s\n", url);
 
     if (g_http < 0 && !ps4_transport_init()) {
         char init_error[128];
@@ -386,6 +396,8 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     (void)sceHttpSetConnectTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
     (void)sceHttpSetSendTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
     sceHttpSetRecvTimeOut(tpl, PS4_HTTP_TIMEOUT_US);
+    /* NetSurf owns redirect history, base URLs and the redirect limit. */
+    sceHttpSetAutoRedirect(tpl, 0);
 
     /*
      * IMPORTANT: deliberately no sceHttpsSetSslCallback() and no
@@ -442,14 +454,15 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
 
     size_t expected_len = 0;
     size_t received_len = 0;
-    int length_known = 0;
+    int length_type = ORBIS_HTTP_CONTENTLEN_NOT_FOUND;
+    bool length_known = false;
     {
-        int len_ret = sceHttpGetResponseContentLength(req, &length_known, &expected_len);
-        if (len_ret < 0) {
-            length_known = 0;
-            expected_len = 0;
-        }
+        int len_ret = sceHttpGetResponseContentLength(req, &length_type, &expected_len);
+        /* EXIST is zero, not a truthy boolean. */
+        length_known = len_ret >= 0 && length_type == ORBIS_HTTP_CONTENTLEN_EXIST;
     }
+    fprintf(stderr, "HTTP status=%d length_type=%d length=%zu\n",
+            status, length_type, expected_len);
 
     {
         char *all = NULL;
@@ -491,7 +504,16 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
     }
 
     while (!ctx->aborted) {
-        ret = sceHttpReadData(req, buf, PS4_READ_CHUNK);
+        if (length_known && received_len >= expected_len)
+            break;
+        if (sceKernelGetProcessTime() - started_at >= PS4_TOTAL_TIMEOUT_US) {
+            ps4_send_error(ctx, "PS4: tempo limite de 30 segundos na resposta");
+            goto done;
+        }
+        size_t want = PS4_READ_CHUNK;
+        if (length_known && expected_len - received_len < want)
+            want = expected_len - received_len;
+        ret = sceHttpReadData(req, buf, want);
         if (ret < 0) {
             int last_errno = 0;
             (void)sceHttpGetLastErrno(req, &last_errno);
@@ -501,8 +523,13 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
             ps4_send_error_code(ctx, "sceHttpReadData", ret);
             goto done;
         }
-        if (ret == 0)
+        if (ret == 0) {
+            if (length_known && received_len < expected_len) {
+                ps4_send_error(ctx, "PS4: resposta incompleta do servidor");
+                goto done;
+            }
             break;
+        }
 
         {
             fetch_msg msg;
@@ -513,14 +540,11 @@ static void ps4_process_one(struct ps4_http_ctx *ctx)
         }
 
         received_len += (size_t)ret;
-        if (length_known != 0 && expected_len > 0 &&
-            received_len >= expected_len) {
-            break;
-        }
     }
 
     if (!ctx->aborted) {
         fetch_msg msg;
+        fprintf(stderr, "HTTP finished bytes=%zu\n", received_len);
         msg.type = FETCH_FINISHED;
         ps4_send(ctx, &msg);
     }
@@ -536,6 +560,7 @@ static void ps4_poll(lwc_string *scheme)
 {
     struct ps4_http_ctx *ctx;
     struct ps4_http_ctx *saved = NULL;
+    bool processed = false;
 
     (void)scheme;
 
@@ -543,13 +568,15 @@ static void ps4_poll(lwc_string *scheme)
         ctx = ps4_ring;
         RING_REMOVE(ps4_ring, ctx);
 
-        if (ctx->locked) {
+        if (ctx->locked || (!ctx->aborted && (!ctx->started || processed))) {
             RING_INSERT(saved, ctx);
             continue;
         }
 
-        if (!ctx->aborted)
+        if (!ctx->aborted) {
+            processed = true;
             ps4_process_one(ctx);
+        }
 
         fetch_remove_from_queues(ctx->parent);
         fetch_free(ctx->parent);

@@ -2,7 +2,7 @@ name: Build Independent NetSurf PS4
 
 on:
   push:
-    branches: [ independent-engine-poc ]
+    branches: [ independent-engine-poc, fix/netsurf-1.10-loading ]
   workflow_dispatch:
 
 permissions:
@@ -36,8 +36,27 @@ jobs:
 
       - name: Build NetSurf for PS4
         run: |
+          set -o pipefail
           chmod +x scripts/build_netsurf_ps4.sh
-          scripts/build_netsurf_ps4.sh
+          scripts/build_netsurf_ps4.sh 2>&1 | tee build-loading-fix.log
+
+      - name: Test transport and kernel stat conversion
+        run: |
+          mkdir -p build/tests
+          gcc -g -O1 -fsanitize=address,undefined -ffunction-sections -fdata-sections \
+            -Itests/stubs -I/tmp/netsurf-ps4/src/netsurf \
+            -I/tmp/netsurf-ps4/src/netsurf/include -I/tmp/netsurf-ps4/prefix/include \
+            tests/fetch_test.c -Wl,--gc-sections -o build/tests/fetch_test
+          build/tests/fetch_test
+          gcc -g -fsanitize=address,undefined tests/stat_test.c -o build/tests/stat_test
+          build/tests/stat_test
+
+      - name: Preserve build diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: loading-fix-build-log
+          path: build-loading-fix.log
 
       - name: Package independent PS4 PKG
         run: |
@@ -55,18 +74,18 @@ jobs:
               chmod +x /opt/openorbis/bin/linux/* || true
               scripts/package_netsurf_ps4.sh
             '
-          test -s PS4_Browser_NetSurf_v1.9_Network_Trace.pkg
-          sha256sum -c PS4_Browser_NetSurf_v1.9_Network_Trace.pkg.sha256
+          test -s PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg
+          sha256sum -c PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg.sha256
 
       - name: Upload independent PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-NetSurf-PoC
+          name: PS4-Browser-NetSurf-v1.10-Loading-Fix
           retention-days: 30
           if-no-files-found: error
           path: |
-            PS4_Browser_NetSurf_v1.9_Network_Trace.pkg
-            PS4_Browser_NetSurf_v1.9_Network_Trace.pkg.sha256
+            PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg
+            PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg.sha256
 
       - name: Upload cross-build
         uses: actions/upload-artifact@v4

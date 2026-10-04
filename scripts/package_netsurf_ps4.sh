@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${OO_PS4_TOOLCHAIN:?OO_PS4_TOOLCHAIN must point to OpenOrbis/PS4Toolchain}"
 
-TITLE="PS4 Browser NetSurf 1.9 Network Trace"
-VERSION="01.09"
+TITLE="PS4 Browser NetSurf 1.10"
+VERSION="01.10"
 TITLE_ID="PBNF00001"
 CONTENT_ID="IV0000-PBNF00001_00-NETSURFPS4POC001"
 
@@ -83,10 +83,10 @@ echo "==> build PKG"
 
 pkg="$(find "$OUTDIR" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
 test -n "$pkg"
-cp "$pkg" "$ROOT/PS4_Browser_NetSurf_v1.9_Network_Trace.pkg"
+cp "$pkg" "$ROOT/PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg"
 (
   cd "$ROOT"
-  sha256sum PS4_Browser_NetSurf_v1.9_Network_Trace.pkg > PS4_Browser_NetSurf_v1.9_Network_Trace.pkg.sha256
+  sha256sum PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg > PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg.sha256
 )
 
-echo "SUCCESS: $ROOT/PS4_Browser_NetSurf_v1.9_Network_Trace.pkg"
+echo "SUCCESS: $ROOT/PS4_Browser_NetSurf_v1.10_Loading_Fix.pkg"

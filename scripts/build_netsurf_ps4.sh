@@ -17,7 +17,7 @@ HOST="x86_64-pc-freebsd12-elf"
 BUILD="x86_64-linux-gnu"
 NSBUILD="$SRC/buildsystem"
 
-rm -rf "$WORK"
+rm -rf "$SRC" "$PREFIX" "$TOOLS" "$WORK/zlib-obj"
 mkdir -p "$SRC" "$PREFIX" "$TOOLS"
 
 fetch_repo() {
@@ -25,7 +25,9 @@ fetch_repo() {
     local sha="$2"
     local dst="$3"
     echo "==> fetch $repo @ $sha"
-    curl -fL --retry 5 --retry-all-errors "https://github.com/${repo}/archive/${sha}.tar.gz" -o "$WORK/${dst}.tar.gz"
+    if ! tar tzf "$WORK/${dst}.tar.gz" >/dev/null 2>&1; then
+        curl -fL --retry 5 --retry-all-errors "https://github.com/${repo}/archive/${sha}.tar.gz" -o "$WORK/${dst}.tar.gz"
+    fi
     mkdir -p "$SRC/$dst"
     tar xzf "$WORK/${dst}.tar.gz" -C "$SRC/$dst" --strip-components=1
 }
@@ -207,7 +209,7 @@ s = s.replace(
 )
 s = s.replace(
     "static const char *feurl;",
-    "static const char *feurl;\n#ifdef ORBIS\nstatic const char *ps4_network_test_page(void);\n#endif"
+    "static const char *feurl;"
 )
 
 # Hardware startup diagnostic.  This deliberately runs before NetSurf core
@@ -359,203 +361,6 @@ s = s.replace(
 )
 
 p.write_text(s)
-# Native PS4 HTTP/HTTPS preflight. This runs before the NetSurf fetcher so
-# we can distinguish PS4 networking failures from fetch-bridge failures.
-netdiag_code = r'''
-#ifdef ORBIS
-struct ps4_probe_result {
-    int stage;
-    int code;
-    int http_status;
-    int bytes;
-};
-
-static const char *ps4_probe_stage_name(int stage)
-{
-    switch (stage) {
-    case 0: return "OK";
-    case 1: return "net-pool";
-    case 2: return "ssl-init";
-    case 3: return "http-init";
-    case 4: return "template";
-    case 5: return "connection";
-    case 6: return "request";
-    case 7: return "send";
-    case 8: return "status";
-    case 9: return "read";
-    default: return "unknown";
-    }
-}
-
-static struct ps4_probe_result
-ps4_native_probe(int http, const char *url)
-{
-    struct ps4_probe_result r;
-    int tpl = -1, conn = -1, req = -1;
-    int ret;
-    unsigned char buf[2048];
-
-    memset(&r, 0, sizeof(r));
-
-    tpl = sceHttpCreateTemplate(http, "PS4BrowserPreflight/1.0",
-                                ORBIS_HTTP_VERSION_1_1, 1);
-    if (tpl < 0) {
-        r.stage = 4; r.code = tpl; goto done;
-    }
-
-    (void)sceHttpSetResolveTimeOut(tpl, 5000000);
-    (void)sceHttpSetConnectTimeOut(tpl, 5000000);
-    (void)sceHttpSetSendTimeOut(tpl, 5000000);
-    sceHttpSetRecvTimeOut(tpl, 5000000);
-
-    conn = sceHttpCreateConnectionWithURL(tpl, url, false);
-    if (conn < 0) {
-        r.stage = 5; r.code = conn; goto done;
-    }
-
-    req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url, 0);
-    if (req < 0) {
-        r.stage = 6; r.code = req; goto done;
-    }
-
-    (void)sceHttpAddRequestHeader(req, "Accept-Encoding", "identity", 1);
-    (void)sceHttpAddRequestHeader(req, "Connection", "close", 1);
-
-    ret = sceHttpSendRequest(req, NULL, 0);
-    if (ret < 0) {
-        r.stage = 7; r.code = ret; goto done;
-    }
-
-    ret = sceHttpGetStatusCode(req, &r.http_status);
-    if (ret < 0) {
-        r.stage = 8; r.code = ret; goto done;
-    }
-
-    ret = sceHttpReadData(req, buf, sizeof(buf));
-    if (ret < 0) {
-        r.stage = 9; r.code = ret; goto done;
-    }
-
-    r.bytes = ret;
-    r.stage = 0;
-    r.code = 0;
-
-done:
-    if (req >= 0) sceHttpDeleteRequest(req);
-    if (conn >= 0) sceHttpDeleteConnection(conn);
-    if (tpl >= 0) sceHttpDeleteTemplate(tpl);
-    return r;
-}
-
-static void ps4_percent_encode(const char *src, char *dst, size_t cap)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    size_t o = 0;
-
-    if (cap == 0) return;
-
-    for (size_t i = 0; src[i] != '\0' && o + 1 < cap; i++) {
-        unsigned char c = (unsigned char)src[i];
-        bool safe = (c >= 'A' && c <= 'Z') ||
-                    (c >= 'a' && c <= 'z') ||
-                    (c >= '0' && c <= '9') ||
-                    c == '-' || c == '_' || c == '.' || c == '~';
-
-        if (safe) {
-            dst[o++] = (char)c;
-        } else {
-            if (o + 3 >= cap) break;
-            dst[o++] = '%';
-            dst[o++] = hex[(c >> 4) & 0xF];
-            dst[o++] = hex[c & 0xF];
-        }
-    }
-
-    dst[o] = '\0';
-}
-
-static const char *ps4_network_test_page(void)
-{
-    static char data_url[16384];
-    char html[4096];
-    char encoded[12288];
-
-    struct ps4_probe_result http_r = {0};
-    struct ps4_probe_result https_r = {0};
-
-    int net_pool = -1;
-    int ssl = -1;
-    int http = -1;
-
-    (void)sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_NET);
-    (void)sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_SSL);
-    (void)sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_HTTP);
-    (void)sceNetInit();
-
-    net_pool = sceNetPoolCreate("netsurf-preflight", 128 * 1024, 0);
-    if (net_pool < 0) {
-        http_r.stage = https_r.stage = 1;
-        http_r.code = https_r.code = net_pool;
-        goto render;
-    }
-
-    ssl = sceSslInit(1024 * 1024);
-    if (ssl < 0) {
-        http_r.stage = https_r.stage = 2;
-        http_r.code = https_r.code = ssl;
-        goto render;
-    }
-
-    http = sceHttpInit(net_pool, ssl, 1024 * 1024);
-    if (http < 0) {
-        http_r.stage = https_r.stage = 3;
-        http_r.code = https_r.code = http;
-        goto render;
-    }
-
-    http_r = ps4_native_probe(http, "http://example.com/");
-    https_r = ps4_native_probe(http, "https://www.google.com/generate_204");
-
-render:
-    snprintf(html, sizeof(html),
-        "<html><head><title>PS4 Network Test</title>"
-        "<style>"
-        "body{background:#101820;color:white;font-family:sans-serif;margin:70px;}"
-        "h1{font-size:52px;}p{font-size:30px;line-height:1.5;}"
-        "a{display:block;background:white;color:black;padding:30px;margin-top:35px;"
-        "font-size:36px;text-decoration:none;border:3px solid #777;}"
-        "</style></head><body>"
-        "<h1>PS4 Browser - teste nativo de rede</h1>"
-        "<p>HTTP example.com: stage=%s code=0x%08x status=%d bytes=%d</p>"
-        "<p>HTTPS Google: stage=%s code=0x%08x status=%d bytes=%d</p>"
-        "<p>Se os dois mostrarem stage=OK, a internet do PS4 esta funcionando "
-        "e o defeito esta somente na ponte NetSurf - sceHttp.</p>"
-        "<a href='http://example.com/'>TESTAR EXAMPLE PELO NETSURF</a>"
-        "<a href='https://www.google.com/'>ABRIR GOOGLE PELO NETSURF</a>"
-        "</body></html>",
-        ps4_probe_stage_name(http_r.stage), (unsigned)http_r.code,
-        http_r.http_status, http_r.bytes,
-        ps4_probe_stage_name(https_r.stage), (unsigned)https_r.code,
-        https_r.http_status, https_r.bytes);
-
-    if (http >= 0) sceHttpTerm(http);
-    if (ssl >= 0) sceSslTerm(ssl);
-    if (net_pool >= 0) sceNetPoolDestroy(net_pool);
-
-    ps4_percent_encode(html, encoded, sizeof(encoded));
-    snprintf(data_url, sizeof(data_url), "data:text/html,%s", encoded);
-    return data_url;
-}
-#endif
-
-'''
-netdiag_anchor = """static int
-fb_url_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
-{"""
-if "struct ps4_probe_result" not in s:
-    s = s.replace(netdiag_anchor, netdiag_code + "\n" + netdiag_anchor)
-
-
 # PS4-native URL keyboard. The framebuffer OSK is unsuitable for a TV/controller.
 ime_anchor = """static int
 fb_url_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
@@ -712,7 +517,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = ps4_network_test_page();
+	feurl = "https://www.google.com/?gbv=1&hl=pt-BR";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
@@ -762,6 +567,10 @@ if "case NSFB_KEY_ESCAPE:" not in s[s.find("fb_browser_window_input"):s.find("fb
 p.write_text(s)
 PY
 
+cp "$ROOT/ports/netsurf/ps4_stat.c" frontends/framebuffer/ps4_stat.c
+printf '\nS_FRONTEND += ps4_stat.c\n' >> frontends/framebuffer/Makefile
+python3 "$ROOT/tools/patch_netsurf_runtime.py" "$SRC/netsurf"
+
 cat > frontends/framebuffer/res/welcome.html <<'EOF'
 <!doctype html>
 <html>
@@ -797,6 +606,8 @@ small { font-size:24px; }
 </body>
 </html>
 EOF
+
+python3 "$ROOT/tools/embed_netsurf_resources.py" frontends/framebuffer/res frontends/framebuffer/ps4_resources.h
 
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
