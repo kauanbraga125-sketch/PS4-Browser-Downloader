@@ -84,6 +84,9 @@ echo "==> build PKG"
 pkg="$(find "$OUTDIR" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
 test -n "$pkg"
 cp "$pkg" "$ROOT/PS4_Browser_NetSurf_PoC_v1.0.pkg"
-sha256sum "$ROOT/PS4_Browser_NetSurf_PoC_v1.0.pkg" > "$ROOT/PS4_Browser_NetSurf_PoC_v1.0.pkg.sha256"
+(
+  cd "$ROOT"
+  sha256sum PS4_Browser_NetSurf_PoC_v1.0.pkg > PS4_Browser_NetSurf_PoC_v1.0.pkg.sha256
+)
 
 echo "SUCCESS: $ROOT/PS4_Browser_NetSurf_PoC_v1.0.pkg"
