@@ -1,3 +1,5 @@
+#include <cstddef>
+#include <cstdint>
 #include <orbis/Bgft.h>
 #include <orbis/Http.h>
 #include <orbis/Net.h>
