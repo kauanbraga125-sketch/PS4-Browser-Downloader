@@ -65,3 +65,25 @@ Se Node.js, npm, Playwright ou Chromium falharem, o iniciador não fecha silenci
 - mantém uma janela de comando aberta para leitura.
 
 Se o backend estiver realmente pronto, a janela não volta ao prompt e o log deve conter as mensagens de inicialização do servidor nas portas TCP 32124 e UDP 32123.
+
+
+## v7.7 MAX performance
+
+A rota de vídeo não faz mais polling HTTP por frame. O backend abre um stream TCP
+persistente em HTTP_PORT+1 (32125 por padrão) e envia somente o frame JPEG mais recente.
+
+O padrão de desempenho usa screencast Chromium 960x540 JPEG qualidade 35. O PS4:
+- recebe frames no mesmo socket TCP;
+- decodifica JPEG em thread separada;
+- transfere ownership do buffer RGBA para a thread gráfica sem copiar o frame;
+- atualiza uma textura Piglet/GLES e faz upscale para 1920x1080 na GPU;
+- desenha cursor e apresenta a tela em ~60 Hz;
+- executa navegação/scroll/Home em uma fila de comandos separada.
+
+Variáveis opcionais no PC:
+- PBDL_STREAM_WIDTH
+- PBDL_STREAM_HEIGHT
+- PBDL_STREAM_QUALITY
+- PBDL_FRAME_PORT
+
+Para máxima fluidez, mantenha os padrões 960x540 / qualidade 35.

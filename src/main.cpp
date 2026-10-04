@@ -28,12 +28,14 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netinet/tcp.h>
 #include <errno.h>
 #include <time.h>
 #include <sys/types.h>
 #include <cwchar>
 #include <cmath>
 #include <pthread.h>
+#include <deque>
 
 
 struct PbdlShaderBlob {
@@ -285,7 +287,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.6", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1335,7 +1337,7 @@ static bool http_get_bytes_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.6", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1422,7 +1424,7 @@ static bool http_post_json_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.6", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1559,7 +1561,11 @@ struct FrameWorker {
     pthread_t thread{};
     pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     volatile bool stop = false;
-    std::vector<uint8_t> rgba;
+    volatile int socketFd = -1;
+
+    // Ownership of pendingPixels is transferred to the render thread.
+    // This avoids copying an entire RGBA frame between threads.
+    stbi_uc* pendingPixels = nullptr;
     int width = 0;
     int height = 0;
     uint64_t generation = 0;
@@ -1585,134 +1591,122 @@ static bool parse_http_backend(const std::string& backend,
     return !host.empty() && port > 0 && port <= 65535;
 }
 
-static bool raw_http_get_local(const std::string& backend,
-                               const std::string& path,
-                               std::vector<uint8_t>& body,
-                               uint64_t* frameSeq = nullptr) {
-    body.clear();
-    std::string host;
-    int port = 0;
-    if (!parse_http_backend(backend, host, port)) return false;
+static bool recv_exact_frame(int fd, void* dst, size_t bytes,
+                             volatile bool* stopFlag) {
+    uint8_t* p = static_cast<uint8_t*>(dst);
+    size_t got = 0;
+    while (got < bytes && !*stopFlag) {
+        const ssize_t n = recv(fd, p + got, bytes - got, 0);
+        if (n <= 0) return false;
+        got += static_cast<size_t>(n);
+    }
+    return got == bytes;
+}
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return false;
+static uint32_t read_be32(const uint8_t* p) {
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) |
+           static_cast<uint32_t>(p[3]);
+}
+
+static int connect_frame_stream(const std::string& backend) {
+    std::string host;
+    int httpPort = 0;
+    if (!parse_http_backend(backend, host, httpPort)) return -1;
+
+    // v7.7 stream port defaults to HTTP+1 (32125 for 32124).
+    const int framePort = httpPort + 1;
+    if (framePort <= 0 || framePort > 65535) return -1;
+
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    int one = 1;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    int rcvBuf = 1024 * 1024;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvBuf, sizeof(rcvBuf));
 
     sockaddr_in sa{};
     sa.sin_family = AF_INET;
-    sa.sin_port = htons(static_cast<uint16_t>(port));
+    sa.sin_port = htons(static_cast<uint16_t>(framePort));
     sa.sin_addr.s_addr = inet_addr(host.c_str());
-    if (sa.sin_addr.s_addr == INADDR_NONE) {
+    if (sa.sin_addr.s_addr == INADDR_NONE ||
+        connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
         close(fd);
-        return false;
+        return -1;
     }
-
-    if (connect(fd, reinterpret_cast<sockaddr*>(&sa), sizeof(sa)) != 0) {
-        close(fd);
-        return false;
-    }
-
-    const std::string req =
-        "GET " + path + " HTTP/1.1\r\n"
-        "Host: " + host + ":" + std::to_string(port) + "\r\n"
-        "Accept: image/jpeg,image/png\r\n"
-        "Accept-Encoding: identity\r\n"
-        "Connection: close\r\n\r\n";
-
-    size_t sent = 0;
-    while (sent < req.size()) {
-        const ssize_t n = write(fd, req.data() + sent, req.size() - sent);
-        if (n <= 0) {
-            close(fd);
-            return false;
-        }
-        sent += static_cast<size_t>(n);
-    }
-
-    std::vector<uint8_t> response;
-    response.reserve(2 * 1024 * 1024);
-    uint8_t buf[32 * 1024];
-    for (;;) {
-        const ssize_t n = read(fd, buf, sizeof(buf));
-        if (n < 0) {
-            close(fd);
-            return false;
-        }
-        if (n == 0) break;
-        response.insert(response.end(), buf, buf + n);
-        if (response.size() > 12 * 1024 * 1024) {
-            close(fd);
-            return false;
-        }
-    }
-    close(fd);
-
-    static const uint8_t sep[] = {'\r','\n','\r','\n'};
-    auto it = std::search(response.begin(), response.end(),
-                          sep, sep + sizeof(sep));
-    if (it == response.end()) return false;
-
-    const size_t headerLen =
-        static_cast<size_t>(it - response.begin()) + sizeof(sep);
-    std::string header(reinterpret_cast<const char*>(response.data()),
-                       headerLen);
-    if (header.find(" 200 ") == std::string::npos) return false;
-
-    if (frameSeq) {
-        std::string lowerHeader = header;
-        std::transform(lowerHeader.begin(), lowerHeader.end(),
-                       lowerHeader.begin(),
-                       [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-        const std::string key = "x-frame-seq:";
-        const size_t p = lowerHeader.find(key);
-        if (p != std::string::npos) {
-            const char* start = header.c_str() + p + key.size();
-            *frameSeq = static_cast<uint64_t>(std::strtoull(start, nullptr, 10));
-        } else {
-            *frameSeq = 0;
-        }
-    }
-
-    body.assign(response.begin() + headerLen, response.end());
-    return !body.empty();
+    return fd;
 }
 
 static void* frame_worker_main(void* arg) {
     FrameWorker* worker = static_cast<FrameWorker*>(arg);
-    uint64_t counter = 0;
+    std::vector<uint8_t> jpeg;
+    jpeg.reserve(512 * 1024);
 
-    uint64_t lastFrameSeq = 0;
     while (!worker->stop) {
-        std::vector<uint8_t> imageBytes;
-        const std::string path =
-            "/shot-fast?t=" + std::to_string(++counter);
-        uint64_t frameSeq = 0;
-
-        if (raw_http_get_local(worker->backend, path, imageBytes, &frameSeq) &&
-            (frameSeq == 0 || frameSeq != lastFrameSeq)) {
-            int w = 0, h = 0, channels = 0;
-            stbi_uc* pixels = stbi_load_from_memory(
-                imageBytes.data(), static_cast<int>(imageBytes.size()),
-                &w, &h, &channels, 4);
-
-            if (pixels && w > 0 && h > 0) {
-                const size_t size =
-                    static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
-                pthread_mutex_lock(&worker->mutex);
-                worker->rgba.assign(pixels, pixels + size);
-                worker->width = w;
-                worker->height = h;
-                worker->generation++;
-                worker->everLoaded = true;
-                pthread_mutex_unlock(&worker->mutex);
-                if (frameSeq) lastFrameSeq = frameSeq;
-            }
-            if (pixels) stbi_image_free(pixels);
+        const int fd = connect_frame_stream(worker->backend);
+        if (fd < 0) {
+            for (int i = 0; i < 40 && !worker->stop; ++i)
+                usleep(10 * 1000);
+            continue;
         }
 
-        // CDP screencast is push-driven on the PC; poll the latest frame often.
-        for (int i = 0; i < 2 && !worker->stop; ++i)
-            usleep(10 * 1000);
+        worker->socketFd = fd;
+        append_diag("FRAME_STREAM", "conectado");
+
+        while (!worker->stop) {
+            uint8_t header[12]{};
+            if (!recv_exact_frame(fd, header, sizeof(header), &worker->stop))
+                break;
+
+            if (std::memcmp(header, "PBDL", 4) != 0) {
+                append_diag("FRAME_STREAM", "magic invalido");
+                break;
+            }
+
+            const uint32_t seq = read_be32(header + 4);
+            const uint32_t length = read_be32(header + 8);
+            if (length == 0 || length > 3 * 1024 * 1024) {
+                append_diag("FRAME_STREAM", "tamanho invalido");
+                break;
+            }
+
+            jpeg.resize(length);
+            if (!recv_exact_frame(fd, jpeg.data(), jpeg.size(), &worker->stop))
+                break;
+
+            int w = 0, h = 0, channels = 0;
+            stbi_uc* pixels = stbi_load_from_memory(
+                jpeg.data(), static_cast<int>(jpeg.size()),
+                &w, &h, &channels, 4);
+            if (!pixels || w <= 0 || h <= 0) {
+                if (pixels) stbi_image_free(pixels);
+                continue;
+            }
+
+            pthread_mutex_lock(&worker->mutex);
+            if (worker->pendingPixels)
+                stbi_image_free(worker->pendingPixels);
+            worker->pendingPixels = pixels;
+            worker->width = w;
+            worker->height = h;
+            worker->generation = seq ? seq : worker->generation + 1;
+            worker->everLoaded = true;
+            pthread_mutex_unlock(&worker->mutex);
+        }
+
+        (void)shutdown(fd, SHUT_RDWR);
+        close(fd);
+        worker->socketFd = -1;
+
+        if (!worker->stop) {
+            append_diag("FRAME_STREAM", "reconectando");
+            usleep(150 * 1000);
+        }
     }
+
+    worker->socketFd = -1;
     return nullptr;
 }
 
@@ -1720,50 +1714,24 @@ static bool start_frame_worker(FrameWorker& worker,
                                const std::string& backend) {
     worker.backend = backend;
     worker.stop = false;
+    worker.socketFd = -1;
     return pthread_create(&worker.thread, nullptr,
                           frame_worker_main, &worker) == 0;
 }
 
 static void stop_frame_worker(FrameWorker& worker) {
     worker.stop = true;
+    const int fd = worker.socketFd;
+    if (fd >= 0) (void)shutdown(fd, SHUT_RDWR);
     pthread_join(worker.thread, nullptr);
-    pthread_mutex_destroy(&worker.mutex);
-}
-
-static bool consume_latest_frame(FrameWorker& worker,
-                                 uint64_t& seenGeneration,
-                                 SDL_Surface* scaledSurface) {
-    std::vector<uint8_t> copy;
-    int w = 0, h = 0;
-    uint64_t generation = 0;
 
     pthread_mutex_lock(&worker.mutex);
-    generation = worker.generation;
-    if (generation != seenGeneration && !worker.rgba.empty()) {
-        copy = worker.rgba;
-        w = worker.width;
-        h = worker.height;
+    if (worker.pendingPixels) {
+        stbi_image_free(worker.pendingPixels);
+        worker.pendingPixels = nullptr;
     }
     pthread_mutex_unlock(&worker.mutex);
-
-    if (copy.empty() || w <= 0 || h <= 0) return false;
-
-    SDL_Surface* source = SDL_CreateRGBSurfaceFrom(
-        copy.data(), w, h, 32, w * 4,
-        0x000000FF, 0x0000FF00, 0x00FF0000, 0xFF000000);
-    if (!source) return false;
-
-    SDL_FillRect(scaledSurface, nullptr,
-                 SDL_MapRGB(scaledSurface->format, 0, 0, 0));
-    SDL_Rect dst{0, 0, SCREEN_W, SCREEN_H};
-    const int rc = SDL_BlitScaled(source, nullptr, scaledSurface, &dst);
-    SDL_FreeSurface(source);
-
-    if (rc == 0) {
-        seenGeneration = generation;
-        return true;
-    }
-    return false;
+    pthread_mutex_destroy(&worker.mutex);
 }
 
 static void draw_cursor(SDL_Surface* surface, int x, int y) {
@@ -1790,6 +1758,76 @@ static bool backend_api(const std::string& backend,
                         const std::string& json = "{}") {
     return http_post_json_native(backend + path, json);
 }
+
+struct ControlCommand {
+    std::string path;
+    std::string json;
+};
+
+struct ControlWorker {
+    std::string backend;
+    pthread_t thread{};
+    pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+    pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+    std::deque<ControlCommand> queue;
+    bool stop = false;
+};
+
+static void* control_worker_main(void* arg) {
+    ControlWorker* worker = static_cast<ControlWorker*>(arg);
+    for (;;) {
+        pthread_mutex_lock(&worker->mutex);
+        while (!worker->stop && worker->queue.empty())
+            pthread_cond_wait(&worker->cond, &worker->mutex);
+
+        if (worker->stop && worker->queue.empty()) {
+            pthread_mutex_unlock(&worker->mutex);
+            break;
+        }
+
+        ControlCommand cmd = worker->queue.front();
+        worker->queue.pop_front();
+        pthread_mutex_unlock(&worker->mutex);
+
+        (void)backend_api(worker->backend, cmd.path.c_str(), cmd.json);
+    }
+    return nullptr;
+}
+
+static bool start_control_worker(ControlWorker& worker,
+                                 const std::string& backend) {
+    worker.backend = backend;
+    worker.stop = false;
+    return pthread_create(&worker.thread, nullptr,
+                          control_worker_main, &worker) == 0;
+}
+
+static void queue_control(ControlWorker& worker,
+                          const char* path,
+                          const std::string& json = "{}") {
+    pthread_mutex_lock(&worker.mutex);
+
+    // Keep latency bounded. Navigation commands are tiny and infrequent;
+    // scrolling is allowed to replace stale work rather than build a backlog.
+    if (worker.queue.size() >= 16)
+        worker.queue.pop_front();
+
+    worker.queue.push_back(ControlCommand{path, json});
+    pthread_cond_signal(&worker.cond);
+    pthread_mutex_unlock(&worker.mutex);
+}
+
+static void stop_control_worker(ControlWorker& worker) {
+    pthread_mutex_lock(&worker.mutex);
+    worker.stop = true;
+    pthread_cond_signal(&worker.cond);
+    pthread_mutex_unlock(&worker.mutex);
+
+    pthread_join(worker.thread, nullptr);
+    pthread_cond_destroy(&worker.cond);
+    pthread_mutex_destroy(&worker.mutex);
+}
+
 
 static bool backend_focus_is_editable(const std::string& backend) {
     std::string text;
@@ -1855,7 +1893,7 @@ static float cursor_axis_velocity(uint8_t raw) {
     if (t > 1.0f) t = 1.0f;
 
     // Gentle precision near center, rapid travel at larger deflection.
-    const float speed = 120.0f * t + 2800.0f * t * t;
+    const float speed = 150.0f * t + 3200.0f * t * t;
     return centered < 0.0f ? -speed : speed;
 }
 
@@ -2200,13 +2238,16 @@ static void gpu_render(GpuRenderer& g, int cursorX, int cursorY) {
 
 static bool take_latest_frame(FrameWorker& worker,
                               uint64_t& seenGeneration,
-                              std::vector<uint8_t>& pixels,
+                              stbi_uc*& pixels,
                               int& w, int& h) {
+    pixels = nullptr;
     bool got = false;
+
     pthread_mutex_lock(&worker.mutex);
-    if (worker.generation != seenGeneration &&
-        !worker.rgba.empty()) {
-        pixels.swap(worker.rgba);
+    if (worker.pendingPixels &&
+        worker.generation != seenGeneration) {
+        pixels = worker.pendingPixels;
+        worker.pendingPixels = nullptr;
         w = worker.width;
         h = worker.height;
         seenGeneration = worker.generation;
@@ -2254,7 +2295,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.6 GPU screencast");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.7 max performance");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -2299,7 +2340,7 @@ int main() {
         clean_exit_to_shell();
     }
 
-    notify_user("Hybrid v7.6 GPU: X clicar | O voltar | R2 URL | L2 Google | Options sair");
+    notify_user("Hybrid v7.7 MAX: X clicar | O voltar | R2 URL | L2 Google | Options sair");
 
     float cursorX = SCREEN_W * 0.5f;
     float cursorY = SCREEN_H * 0.5f;
@@ -2307,12 +2348,17 @@ int main() {
     uint64_t seenGeneration = 0;
     uint64_t lastUs = sceKernelGetProcessTime();
 
-    std::vector<uint8_t> pendingPixels;
+    stbi_uc* pendingPixels = nullptr;
     int pendingW = 0;
     int pendingH = 0;
 
+    ControlWorker controlWorker;
+    const bool controlWorkerStarted =
+        start_control_worker(controlWorker, backend);
+
     for (;;) {
-        const uint64_t nowUs = sceKernelGetProcessTime();
+        const uint64_t loopStartUs = sceKernelGetProcessTime();
+        const uint64_t nowUs = loopStartUs;
         float dt = static_cast<float>(nowUs - lastUs) / 1000000.0f;
         lastUs = nowUs;
         if (dt < 0.0f) dt = 0.0f;
@@ -2320,9 +2366,9 @@ int main() {
 
         if (take_latest_frame(frameWorker, seenGeneration,
                               pendingPixels, pendingW, pendingH)) {
-            gpu_upload_frame(gpu, pendingPixels.data(),
-                             pendingW, pendingH);
-            pendingPixels.clear();
+            gpu_upload_frame(gpu, pendingPixels, pendingW, pendingH);
+            stbi_image_free(pendingPixels);
+            pendingPixels = nullptr;
         }
 
         OrbisPadData pd{};
@@ -2348,7 +2394,6 @@ int main() {
                 if (backend_api(backend, "/api/click",
                     "{\"x\":" + std::to_string(bx) +
                     ",\"y\":" + std::to_string(by) + "}")) {
-                    usleep(35 * 1000);
                     if (backend_focus_is_editable(backend)) {
                         std::string text;
                         if (open_url_ime(text)) {
@@ -2360,20 +2405,40 @@ int main() {
             }
 
             if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
-                (pressed & ORBIS_PAD_BUTTON_L1))
-                backend_api(backend, "/api/back");
+                (pressed & ORBIS_PAD_BUTTON_L1)) {
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/back");
+                else
+                    backend_api(backend, "/api/back");
+            }
 
-            if (pressed & ORBIS_PAD_BUTTON_R1)
-                backend_api(backend, "/api/forward");
+            if (pressed & ORBIS_PAD_BUTTON_R1) {
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/forward");
+                else
+                    backend_api(backend, "/api/forward");
+            }
 
-            if (pressed & ORBIS_PAD_BUTTON_SQUARE)
-                backend_api(backend, "/api/reload");
+            if (pressed & ORBIS_PAD_BUTTON_SQUARE) {
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/reload");
+                else
+                    backend_api(backend, "/api/reload");
+            }
 
-            if (pressed & ORBIS_PAD_BUTTON_UP)
-                backend_api(backend, "/api/scroll", "{\"y\":-500}");
+            if (pressed & ORBIS_PAD_BUTTON_UP) {
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/scroll", "{\"y\":-500}");
+                else
+                    backend_api(backend, "/api/scroll", "{\"y\":-500}");
+            }
 
-            if (pressed & ORBIS_PAD_BUTTON_DOWN)
-                backend_api(backend, "/api/scroll", "{\"y\":500}");
+            if (pressed & ORBIS_PAD_BUTTON_DOWN) {
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/scroll", "{\"y\":500}");
+                else
+                    backend_api(backend, "/api/scroll", "{\"y\":500}");
+            }
 
             if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) {
                 backend_api(backend, "/api/image-at",
@@ -2399,7 +2464,10 @@ int main() {
             }
 
             if (pressed & ORBIS_PAD_BUTTON_L2) {
-                backend_api(backend, "/api/home");
+                if (controlWorkerStarted)
+                    queue_control(controlWorker, "/api/home");
+                else
+                    backend_api(backend, "/api/home");
                 notify_user("Hybrid: Google/Home.");
             }
 
@@ -2413,11 +2481,14 @@ int main() {
                 static_cast<int>(cursorY));
         }
 
-        // eglSwapInterval(1) should pace at display refresh. This tiny sleep
-        // prevents a runaway loop on systems where swap interval is ignored.
-        usleep(1000);
+        // Maintain ~60 Hz only when eglSwapBuffers returned faster than vblank.
+        const uint64_t elapsedUs = sceKernelGetProcessTime() - loopStartUs;
+        const uint64_t targetUs = 16667;
+        if (elapsedUs < targetUs)
+            usleep(static_cast<useconds_t>(targetUs - elapsedUs));
     }
 
+    if (controlWorkerStarted) stop_control_worker(controlWorker);
     if (downloadWorkerStarted) stop_download_worker(downloadWorker);
     stop_frame_worker(frameWorker);
     scePadClose(pad);

@@ -2,21 +2,22 @@
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-title PS4 Hybrid Browser Backend v7.3.1
+title PS4 Hybrid Browser Backend v7.7
 set "LOG=%~dp0backend_start.log"
 
 > "%LOG%" echo ============================================================
->>"%LOG%" echo PS4 Hybrid Browser Backend v7.3.1
+>>"%LOG%" echo PS4 Hybrid Browser Backend v7.7
 >>"%LOG%" echo Started: %DATE% %TIME%
 >>"%LOG%" echo Folder: %CD%
 >>"%LOG%" echo ============================================================
 
 echo.
 echo ============================================================
-echo   PS4 Hybrid Browser Backend v7.3.1
+echo   PS4 Hybrid Browser Backend v7.7
 echo ============================================================
 echo.
 echo Esta janela DEVE ficar aberta enquanto voce usa o navegador no PS4.
+echo Modo padrao: stream 960x540 JPEG pela LAN + upscale GPU no PS4.
 echo Se houver erro, ela NAO vai fechar sozinha.
 echo O diagnostico sera salvo em:
 echo   %LOG%
@@ -70,6 +71,7 @@ echo.
 echo Quando estiver pronto voce deve ver mensagens como:
 echo   [Hybrid] HTTP port: 32124
 echo   [Hybrid] Discovery UDP: 32123
+echo   [Hybrid] Frame stream TCP: 32125
 echo.
 echo NAO feche esta janela.
 echo ============================================================

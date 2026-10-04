@@ -2,6 +2,7 @@
 const express = require("express");
 const { chromium } = require("playwright");
 const dgram = require("dgram");
+const net = require("net");
 const os = require("os");
 const crypto = require("crypto");
 const path = require("path");
@@ -10,7 +11,11 @@ const { Readable } = require("stream");
 
 const HTTP_PORT = Number(process.env.PBDL_HTTP_PORT || 32124);
 const DISCOVERY_PORT = Number(process.env.PBDL_DISCOVERY_PORT || 32123);
+const FRAME_PORT = Number(process.env.PBDL_FRAME_PORT || (HTTP_PORT + 1));
 const VIEWPORT = { width: 1280, height: 720 };
+const STREAM_WIDTH = Number(process.env.PBDL_STREAM_WIDTH || 960);
+const STREAM_HEIGHT = Number(process.env.PBDL_STREAM_HEIGHT || 540);
+const STREAM_QUALITY = Number(process.env.PBDL_STREAM_QUALITY || 35);
 
 let browser = null;
 let context = null;
@@ -23,6 +28,26 @@ let lastDownload = null;
 let lastMessage = "Inicializando Chromium...";
 const downloads = new Map();
 const recentRequests = new Map();
+const frameClients = new Set();
+
+function sendFrameToClient(socket, frame, seq) {
+  if (!frame || !socket || socket.destroyed) return;
+  // Never queue many old frames. A remote browser should display the newest
+  // page state, not faithfully replay stale frames.
+  if (socket.writableLength > 512 * 1024) return;
+
+  const header = Buffer.allocUnsafe(12);
+  header.write("PBDL", 0, 4, "ascii");
+  header.writeUInt32BE((seq >>> 0), 4);
+  header.writeUInt32BE(frame.length >>> 0, 8);
+  socket.write(header);
+  socket.write(frame);
+}
+
+function broadcastFrame(frame, seq) {
+  for (const socket of frameClients)
+    sendFrameToClient(socket, frame, seq);
+}
 
 function safeName(name) {
   name = String(name || "download.bin").replace(/[\\/:*?"<>|]/g, "_").trim();
@@ -129,6 +154,7 @@ async function startCdpScreencast(p) {
       latestFrame = Buffer.from(evt.data, "base64");
       latestFrameSeq++;
       latestFrameAt = Date.now();
+      broadcastFrame(latestFrame, latestFrameSeq);
       try {
         await cdpSession.send("Page.screencastFrameAck", {
           sessionId: evt.sessionId
@@ -137,9 +163,9 @@ async function startCdpScreencast(p) {
     });
     await cdpSession.send("Page.startScreencast", {
       format: "jpeg",
-      quality: 42,
-      maxWidth: VIEWPORT.width,
-      maxHeight: VIEWPORT.height,
+      quality: STREAM_QUALITY,
+      maxWidth: STREAM_WIDTH,
+      maxHeight: STREAM_HEIGHT,
       everyNthFrame: 1
     });
     console.log("[Hybrid] CDP screencast ativo");
@@ -307,7 +333,7 @@ app.get("/ps4", function(req, res) {
   });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.6.0" });
+  res.json({ ok: true, version: "7.7.0", framePort: FRAME_PORT, stream: STREAM_WIDTH + "x" + STREAM_HEIGHT });
 });
 app.get("/shot", async function(_req, res) {
   try {
@@ -327,7 +353,7 @@ app.get("/shot-fast", async function(_req, res) {
     if (!jpg) {
       jpg = await page.screenshot({
         type: "jpeg",
-        quality: 42
+        quality: STREAM_QUALITY
       });
       latestFrame = jpg;
       latestFrameSeq++;
@@ -515,6 +541,27 @@ app.get("/file/:kind/:token/:name", async function(req, res) {
   }
 });
 
+
+const frameServer = net.createServer(function(socket) {
+  socket.setNoDelay(true);
+  socket.setKeepAlive(true, 1000);
+  frameClients.add(socket);
+
+  // A newly connected PS4 should not wait for the next page animation.
+  if (latestFrame)
+    sendFrameToClient(socket, latestFrame, latestFrameSeq);
+
+  socket.on("error", function(){});
+  socket.on("close", function() {
+    frameClients.delete(socket);
+  });
+});
+frameServer.listen(FRAME_PORT, "0.0.0.0", function() {
+  console.log("[Hybrid] Frame stream TCP:", FRAME_PORT,
+              STREAM_WIDTH + "x" + STREAM_HEIGHT,
+              "JPEG q=" + STREAM_QUALITY);
+});
+
 const server = app.listen(HTTP_PORT, "0.0.0.0", async function() {
   console.log("[Hybrid] HTTP port:", HTTP_PORT);
   console.log("[Hybrid] LAN hint:", getLanIp());
@@ -536,5 +583,9 @@ udp.bind(DISCOVERY_PORT, "0.0.0.0", function() {
 });
 process.on("SIGINT", async function() {
   try { if (browser) await browser.close(); } catch (_) {}
+  for (const socket of frameClients) {
+    try { socket.destroy(); } catch (_) {}
+  }
+  frameServer.close(function(){});
   server.close(function(){ process.exit(0); });
 });
