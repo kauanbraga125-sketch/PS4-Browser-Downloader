@@ -253,7 +253,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.1", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.1.1", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -803,10 +803,25 @@ static std::string regex_escape(const std::string& in) {
 }
 
 static std::string make_navigation_regex(const std::string& startUrl) {
-    // WebBrowserDialog's REGEXP callback is evaluated on top-level navigation.
-    // Exclude only the page being opened, then capture every subsequent http(s)
-    // navigation before the dialog tries to handle popup/download/new-window UI.
-    return "^(?!" + regex_escape(startUrl) + "$)(https?://.*|blob:.*|data:.*)$";
+    // IMPORTANT: never capture ordinary browsing/search navigation here.
+    // A WebBrowserDialog callback FINISHES the dialog, so a universal http(s)
+    // regex makes Google search / R2 / normal links look like "close browser".
+    //
+    // Capture only destinations that need our own handling:
+    //  - SuperPSX internal navigation (reopened in the same window)
+    //  - known file hosts
+    //  - explicit download-looking paths on ROM sites
+    //  - direct file extensions
+    //  - blob/data schemes for diagnostics
+    const std::string current = regex_escape(startUrl);
+    return
+        "^(?!" + current + "$)("
+        "https?://(www\\.)?superpsx\\.com/.*|"
+        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*|"
+        "https?://([^/]+\\.)?(romspure\\.cc|romsfun\\.co)/.*(download|/dl/|file).*|"
+        "https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
+        "blob:.*|data:.*"
+        ")$";
 }
 
 struct TextResponse {
@@ -1100,7 +1115,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
         return false;
     }
 
-    g_status = "WebKit v5.1: toda navegacao passa pelo interceptor.";
+    g_status = "WebKit v5.1.1: pesquisa normal; interceptor apenas para downloads.";
 
     bool finished = false;
     for (;;) {
@@ -1151,7 +1166,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
             return open_browser_and_wait(reopen.c_str());
     }
 
-    g_status = "Navegador fechado - v5.1";
+    g_status = "Navegador fechado - v5.1.1";
     return true;
 }
 
@@ -1163,7 +1178,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Browser v5.1 universal navigation interceptor");
+    append_diag("BOOT", "PS4 Browser v5.1.1 targeted download interceptor");
     (void)start_download_daemon();
 
     // Keep the same DEFAULT WebKit path proven on hardware.
