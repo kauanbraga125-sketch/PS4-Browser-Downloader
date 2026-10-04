@@ -1,8 +1,8 @@
-name: Build PS4 Browser Downloader PKG
+name: Build PS4 WebKit Browser v4
 
 on:
   push:
-    branches: [ main ]
+    branches: [ native-webkit-v4 ]
   workflow_dispatch:
 
 permissions:
@@ -58,15 +58,15 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_Downloader_v1.0.pkg
-          sha256sum PS4_Browser_Downloader_v1.0.pkg > PS4_Browser_Downloader_v1.0.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_Test.pkg
+          sha256sum PS4_Browser_WebKit_v4_Test.pkg > PS4_Browser_WebKit_v4_Test.pkg.sha256
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-Downloader-PS4
+          name: PS4-Browser-WebKit-v4
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Browser_Downloader_v1.0.pkg
-            PS4_Browser_Downloader_v1.0.pkg.sha256
+            PS4_Browser_WebKit_v4_Test.pkg
+            PS4_Browser_WebKit_v4_Test.pkg.sha256

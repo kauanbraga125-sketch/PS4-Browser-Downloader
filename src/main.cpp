@@ -20,9 +20,13 @@ namespace {
 static const int SCREEN_W = 1920;
 static const int SCREEN_H = 1080;
 static const uint32_t DIALOG_MAGIC = 0xC0D1A109;
+static const int DIALOG_STATUS_NONE = 0;
+static const int DIALOG_STATUS_INITIALIZED = 1;
+static const int DIALOG_STATUS_RUNNING = 2;
 static const int DIALOG_STATUS_FINISHED = 3;
 static const int DIALOG_RESULT_CALLBACK = 2;
 static const int CALLBACK_TYPE_REGEXP = 2;
+static const int BROWSER_MODE_DEFAULT = 1;
 static const int BROWSER_MODE_CUSTOM = 2;
 
 struct CommonDialogBaseParam {
@@ -167,6 +171,21 @@ static int32_t load_system_module(const char* name) {
 
 static bool init_browser() {
     if (g_browser.module >= 0) return true;
+
+    /*
+     * The browser dialog is backed by the PS4 system WebKit.  Initialising
+     * CommonDialog first mirrors Sony's own sample flow and recent hardware-
+     * tested homebrew.  "Already initialised" is harmless, so this is best-
+     * effort and we still let WebBrowserDialog report the authoritative error.
+     */
+    const int32_t common = load_system_module("libSceCommonDialog.sprx");
+    if (common >= 0) {
+        using CommonDialogInitializeFn = int32_t (*)();
+        CommonDialogInitializeFn commonInit = nullptr;
+        if (sceKernelDlsym(common, "sceCommonDialogInitialize", (void**)&commonInit) >= 0 && commonInit)
+            (void)commonInit();
+    }
+
     g_browser.module = load_system_module("libSceWebBrowserDialog.sprx");
     if (g_browser.module < 0) {
         g_status = "Nao foi possivel carregar WebBrowserDialog: " + hex32(g_browser.module);
@@ -178,7 +197,8 @@ static bool init_browser() {
         !dlsym_required(g_browser.module, "sceWebBrowserDialogUpdateStatus", (void**)&g_browser.updateStatus) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogGetResult", (void**)&g_browser.getResult) ||
         !dlsym_required(g_browser.module, "sceWebBrowserDialogClose", (void**)&g_browser.close)) return false;
-    int32_t r = g_browser.initialize();
+
+    const int32_t r = g_browser.initialize();
     if (r != 0) {
         g_status = "WebBrowserDialog init falhou: " + hex32(r);
         return false;
@@ -356,45 +376,80 @@ static bool looks_like_pkg(std::string u) {
 
 static bool open_browser_and_wait() {
     if (!init_browser()) return false;
+
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
 
-    static const char* startUrl = "https://www.google.com/";
+    /*
+     * Use the PS4's real WebKit/browser service.  This is intentionally NOT
+     * NetSurf: modern JavaScript, cookies and the DOM are handled by the
+     * console's WebKit stack.  Default mode is tried first because it gives
+     * the browser the least restrictive system presentation (new-window,
+     * media and site UI behaviour are less constrained than our old custom
+     * rectangle).  Custom mode is only a fallback for firmwares where default
+     * presentation is unavailable to homebrew.
+     */
+    static const char* startUrl = "https://www.google.com/?hl=pt-BR";
     static const char* callbackRegex = "https?://.*\\.pkg([?#].*)?$";
+
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
     cb.type = CALLBACK_TYPE_REGEXP;
     cb.data = callbackRegex;
 
-    BrowserImeParam ime{};
-    ime.size = sizeof(ime);
-    ime.option = 0;
-
     BrowserParam p{};
     p.baseParam.size = sizeof(CommonDialogBaseParam);
     p.baseParam.magic = DIALOG_MAGIC + static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&p.baseParam));
     p.size = sizeof(p);
-    p.mode = BROWSER_MODE_CUSTOM;
+    p.mode = BROWSER_MODE_DEFAULT;
     p.userId = user;
     p.url = startUrl;
     p.callbackInitParam = &cb;
-    p.width = 1920;
-    p.height = 963;
-    p.positionX = 0;
-    p.positionY = 117;
-    p.parts = 0x3; // title + address
-    p.headerWidth = 1920;
-    p.control = 0x7F; // exit/reload/back/forward/zoom/options family
-    p.imeParam = &ime;
-    p.animation = 0;
 
+    g_status = "Abrindo WebKit do PS4 (modo completo)...";
     int32_t r = g_browser.open(&p);
-    if (r != 0) { g_status = "Browser open: " + hex32(r); return false; }
 
-    g_status = "Navegador aberto. Ao acessar um link .pkg, ele sera enviado ao BGFT.";
+    if (r != 0) {
+        /*
+         * Fallback to the old custom rectangle, but expose the complete
+         * navigation control family.  We do not reset cookies between the two
+         * attempts, so challenge/session cookies remain in the browser store.
+         */
+        BrowserImeParam ime{};
+        ime.size = sizeof(ime);
+        ime.option = 0;
+
+        BrowserWebViewParam webview{};
+        webview.size = sizeof(webview);
+        webview.option = 0;
+
+        p.mode = BROWSER_MODE_CUSTOM;
+        p.width = 1920;
+        p.height = 963;
+        p.positionX = 0;
+        p.positionY = 117;
+        p.parts = 0x3;      // title + address
+        p.headerWidth = 1920;
+        p.control = 0x7F;   // exit/reload/back/forward/zoom/options family
+        p.imeParam = &ime;
+        p.webviewParam = &webview;
+        p.animation = 0;
+
+        g_status = "Modo completo indisponivel; tentando WebKit custom...";
+        r = g_browser.open(&p);
+    }
+
+    if (r != 0) {
+        g_status = "Browser WebKit open: " + hex32(r);
+        return false;
+    }
+
+    g_status = "WebKit aberto: JavaScript/cookies do sistema ativos. Links .pkg vao para BGFT.";
+
     for (;;) {
         const int32_t st = g_browser.updateStatus();
-        if (st == DIALOG_STATUS_FINISHED) break;
+        if (st == DIALOG_STATUS_FINISHED || st == DIALOG_STATUS_NONE || st < 0)
+            break;
         SDL_Delay(16);
     }
 
@@ -402,17 +457,22 @@ static bool open_browser_and_wait() {
     cbout.size = sizeof(cbout);
     BrowserResult result{};
     result.callbackResultParam = &cbout;
+
     r = g_browser.getResult(&result);
     std::string captured;
-    if (r == 0 && result.result == DIALOG_RESULT_CALLBACK && cbout.data) captured = cbout.data;
-    if (captured.empty() && cbout.buffer && cbout.bufferSize) captured.assign(cbout.buffer, cbout.bufferSize);
+    if (r == 0 && result.result == DIALOG_RESULT_CALLBACK && cbout.data)
+        captured = cbout.data;
+    if (captured.empty() && cbout.buffer && cbout.bufferSize)
+        captured.assign(cbout.buffer, cbout.bufferSize);
+
     g_browser.close();
 
     if (!captured.empty() && looks_like_pkg(captured)) {
-        g_status = "Link PKG capturado. Preparando download...";
+        g_status = "Link PKG capturado. Preparando download em segundo plano...";
         return queue_bgft(captured);
     }
-    g_status = "Navegador fechado sem capturar um link .pkg";
+
+    g_status = "Navegador fechado";
     return true;
 }
 
@@ -431,7 +491,7 @@ static void draw_bar(SDL_Renderer* r) {
 }
 
 static void set_title(SDL_Window* w) {
-    std::string t = "PS4 Browser Downloader | " + g_status;
+    std::string t = "PS4 WebKit Browser v4 | " + g_status;
     SDL_SetWindowTitle(w, t.c_str());
 }
 
@@ -440,13 +500,13 @@ static void set_title(SDL_Window* w) {
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) return 1;
-    SDL_Window* win = SDL_CreateWindow("PS4 Browser Downloader", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, 0);
+    SDL_Window* win = SDL_CreateWindow("PS4 WebKit Browser v4", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, 0);
     if (!win) return 2;
     SDL_Surface* s = SDL_GetWindowSurface(win);
     SDL_Renderer* r = SDL_CreateSoftwareRenderer(s);
     if (!r) return 3;
     if (SDL_NumJoysticks() > 0) SDL_JoystickOpen(0);
-    g_status = "X: abrir navegador | O: sair";
+    g_status = "WebKit v4 | X: abrir navegador | O: sair";
 
     bool running = true;
     while (running) {

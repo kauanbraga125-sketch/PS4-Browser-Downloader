@@ -1,5 +1,5 @@
-TITLE       := PS4 Browser Downloader
-VERSION     := 01.00
+TITLE       := PS4 WebKit Browser
+VERSION     := 04.00
 TITLE_ID    := PBDL00001
 CONTENT_ID  := IV0000-PBDL00001_00-PS4BROWSERDL0001
 
