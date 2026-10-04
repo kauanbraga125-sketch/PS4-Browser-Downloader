@@ -201,7 +201,14 @@ p.write_text(s)
 
 p = Path("frontends/framebuffer/gui.c")
 s = p.read_text()
-s = s.replace("static const char *fename;", 'static const char *fename = "ps4";')
+s = s.replace(
+    "static const char *fename;",
+    'static const char *fename = "ps4";'
+)
+s = s.replace(
+    "static const char *feurl;",
+    "static const char *feurl;\n#ifdef ORBIS\nstatic const char *ps4_network_test_page(void);\n#endif"
+)
 
 # Hardware startup diagnostic.  This deliberately runs before NetSurf core
 # initialisation and uses only the same SDL window-surface API that is proven
