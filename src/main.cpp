@@ -1,4 +1,3 @@
-#include <SDL2/SDL.h>
 #include <orbis/Bgft.h>
 #include <orbis/Http.h>
 #include <orbis/Net.h>
@@ -14,6 +13,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 namespace {
 
@@ -171,6 +171,9 @@ static int32_t load_system_module(const char* name) {
 
 static bool init_browser() {
     if (g_browser.module >= 0) return true;
+
+    // Match Sony SDK sample order: load the WebBrowserDialog sysmodule first.
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_WEB_BROWSER_DIALOG);
 
     /*
      * The browser dialog is backed by the PS4 system WebKit.  Initialising
@@ -450,7 +453,7 @@ static bool open_browser_and_wait() {
         const int32_t st = g_browser.updateStatus();
         if (st == DIALOG_STATUS_FINISHED || st == DIALOG_STATUS_NONE || st < 0)
             break;
-        SDL_Delay(16);
+        usleep(16 * 1000);
     }
 
     BrowserCallbackResultParam cbout{};
@@ -476,63 +479,24 @@ static bool open_browser_and_wait() {
     return true;
 }
 
-static void fill(SDL_Renderer* r, int x, int y, int w, int h, uint8_t rr, uint8_t gg, uint8_t bb) {
-    SDL_Rect rc{x,y,w,h};
-    SDL_SetRenderDrawColor(r, rr,gg,bb,255);
-    SDL_RenderFillRect(r,&rc);
-}
-
-static void draw_bar(SDL_Renderer* r) {
-    fill(r, 0,0,SCREEN_W,SCREEN_H, 12,18,30);
-    fill(r, 0,0,SCREEN_W,130, 24,83,170);
-    fill(r, 160,260,1600,180, 22,30,45);
-    fill(r, 160,500,1600,180, 22,30,45);
-    fill(r, 160,815,1600,130, 20,28,40);
-}
-
-static void set_title(SDL_Window* w) {
-    std::string t = "PS4 WebKit Browser v4 | " + g_status;
-    SDL_SetWindowTitle(w, t.c_str());
-}
 
 } // namespace
 
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) return 1;
-    SDL_Window* win = SDL_CreateWindow("PS4 WebKit Browser v4", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, 0);
-    if (!win) return 2;
-    SDL_Surface* s = SDL_GetWindowSurface(win);
-    SDL_Renderer* r = SDL_CreateSoftwareRenderer(s);
-    if (!r) return 3;
-    if (SDL_NumJoysticks() > 0) SDL_JoystickOpen(0);
-    g_status = "WebKit v4 | X: abrir navegador | O: sair";
 
-    bool running = true;
-    while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = false;
-            if (e.type == SDL_JOYBUTTONDOWN) {
-                if (e.jbutton.button == 0) open_browser_and_wait();
-                else if (e.jbutton.button == 1) running = false;
-            }
-            if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_RETURN) open_browser_and_wait();
-                else if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
-            }
-        }
-        draw_bar(r);
-        SDL_RenderPresent(r);
-        SDL_UpdateWindowSurface(win);
-        set_title(win);
-        SDL_Delay(16);
-    }
+    // No SDL menu, no external controller loop: go straight to the PS4 WebKit.
+    sceUserServiceInitialize(nullptr);
+    const bool ok = open_browser_and_wait();
 
+    // Always tear down in a fixed order; Circle/back is owned by WebBrowserDialog.
     if (g_browser.terminate) g_browser.terminate();
     if (g_bgftInit) sceBgftServiceIntTerm();
     if (g_bgftHeap) std::free(g_bgftHeap);
-    if (g_httpInit) { sceHttpTerm(g_http); sceSslTerm(); sceNetPoolDestroy(g_netPool); }
-    SDL_Quit();
-    return 0;
+    if (g_httpInit) {
+        sceHttpTerm(g_http);
+        sceSslTerm();
+        sceNetPoolDestroy(g_netPool);
+    }
+    return ok ? 0 : 1;
 }
