@@ -156,6 +156,55 @@ s = s.replace(
     "    void __name##_register_surface(void) {                              \\\n",
     "    void __name##_register_surface(void) {                              \\\n"
 )
+# When an HTML editable control places a caret, open the native PS4 IME.
+caret_old = """static void
+gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+		const struct rect *clip)
+{
+	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
+
+	/* set new pos */
+	fbtk_set_caret(g->browser, true, x, y, height,
+			gui_window_remove_caret_cb);
+
+	/* redraw new caret pos */
+	fb_queue_redraw(g->browser,
+			x - bwidget->scrollx,
+			y - bwidget->scrolly,
+			x + 1 - bwidget->scrollx,
+			y + height - bwidget->scrolly);
+}"""
+
+caret_new = """static void
+gui_window_place_caret(struct gui_window *g, int x, int y, int height,
+		const struct rect *clip)
+{
+	struct browser_widget_s *bwidget = fbtk_get_userpw(g->browser);
+
+	/* set new pos */
+	fbtk_set_caret(g->browser, true, x, y, height,
+			gui_window_remove_caret_cb);
+
+	/* redraw new caret pos */
+	fb_queue_redraw(g->browser,
+			x - bwidget->scrollx,
+			y - bwidget->scrolly,
+			x + 1 - bwidget->scrollx,
+			y + height - bwidget->scrolly);
+
+#ifdef ORBIS
+	if (!ps4_form_ime_active) {
+		ps4_form_ime_active = true;
+		(void)ps4_open_form_keyboard(g);
+		ps4_form_ime_active = false;
+	}
+#endif
+}"""
+
+if caret_old not in s:
+    raise SystemExit("framebuffer caret implementation changed")
+s = s.replace(caret_old, caret_new)
+
 p.write_text(s)
 PY
 cat > "$SRC/libnsfb/src/surface/Makefile" <<'EOF'
@@ -683,6 +732,88 @@ static int ps4_url_ignore_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
     (void)widget;
     (void)cbi;
     return 0;
+}
+
+/*
+ * Native IME for editable HTML controls.
+ * NetSurf calls gui_window_place_caret() whenever a text input/textarea
+ * receives focus.  The accepted text is sent back through the normal
+ * browser_window_key_press() path.
+ */
+static bool ps4_form_ime_active;
+
+static bool ps4_open_form_keyboard(struct gui_window *gw)
+{
+    static uint16_t input[512];
+    static uint16_t title[64];
+    bool accepted = false;
+
+    memset(input, 0, sizeof(input));
+    memset(title, 0, sizeof(title));
+    ps4_ascii_to_utf16("Digite o texto", title, 64);
+
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_IME_DIALOG);
+
+    OrbisImeDialogSetting param;
+    memset(&param, 0, sizeof(param));
+    param.userId = 0xFE;
+    param.type = ORBIS_TYPE_DEFAULT;
+    param.enterLabel = ORBIS_BUTTON_LABEL_SEARCH;
+    param.maxTextLength = 510;
+    param.inputTextBuffer = (wchar_t *)input;
+    param.title = (const wchar_t *)title;
+    param.posx = 0.0f;
+    param.posy = 0.0f;
+    param.horizontalAlignment = ORBIS_H_LEFT;
+    param.verticalAlignment = ORBIS_V_TOP;
+
+    if (sceImeDialogInit(&param, NULL) < 0)
+        return false;
+
+    for (;;) {
+        OrbisDialogStatus status = sceImeDialogGetStatus();
+
+        if (status == ORBIS_DIALOG_STATUS_STOPPED) {
+            OrbisDialogResult result;
+            memset(&result, 0, sizeof(result));
+            if (sceImeDialogGetResult(&result) >= 0 &&
+                result.endstatus == ORBIS_DIALOG_OK) {
+                accepted = true;
+            }
+            break;
+        }
+
+        if (status == ORBIS_DIALOG_STATUS_NONE)
+            break;
+
+        SDL_Delay(16);
+    }
+
+    sceImeDialogTerm();
+
+    if (!accepted)
+        return false;
+
+    (void)browser_window_key_press(gw->bw, NS_KEY_SELECT_ALL);
+    (void)browser_window_key_press(gw->bw, NS_KEY_DELETE_RIGHT);
+
+    for (size_t i = 0; input[i] != 0; i++) {
+        uint32_t cp = input[i];
+
+        if (cp >= 0xD800 && cp <= 0xDBFF &&
+            input[i + 1] >= 0xDC00 && input[i + 1] <= 0xDFFF) {
+            uint32_t hi = cp - 0xD800;
+            uint32_t lo = input[++i] - 0xDC00;
+            cp = 0x10000 + ((hi << 10) | lo);
+        }
+
+        (void)browser_window_key_press(gw->bw, cp);
+    }
+
+    /* Search/Go on the PS4 keyboard maps to Enter in the focused control. */
+    (void)browser_window_key_press(gw->bw, NS_KEY_CR);
+
+    return true;
 }
 #endif
 
