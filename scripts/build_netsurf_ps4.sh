@@ -842,7 +842,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = "about:welcome";
+	feurl = "https://html.duckduckgo.com/html/";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
