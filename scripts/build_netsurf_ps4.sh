@@ -799,6 +799,122 @@ small { font-size:24px; }
 </html>
 EOF
 
+
+# On PS4 do not make NetSurf's mandatory UA stylesheets depend on
+# POSIX realpath/stat/access. Embed them into the executable and expose them
+# through gui_fetch_table.get_resource_data().
+python3 - <<'PY'
+from pathlib import Path
+
+root = Path(".")
+resource_names = [
+    "default.css",
+    "adblock.css",
+    "quirks.css",
+    "internal.css",
+]
+
+def c_array(name: str, data: bytes) -> str:
+    ident = "ps4_res_" + name.replace(".", "_").replace("-", "_")
+    vals = ",".join(str(b) for b in data)
+    return (
+        f"static const unsigned char {ident}[] = {{{vals}}};\n"
+        f"static const size_t {ident}_len = sizeof({ident});\n"
+    )
+
+parts = ["/* generated PS4 embedded NetSurf resources */\n"]
+for name in resource_names:
+    data = (root / "resources" / name).read_bytes()
+    parts.append(c_array(name, data))
+
+# NetSurf always asks for resource:user.css.  An empty stylesheet is valid.
+parts.append("static const unsigned char ps4_res_user_css[] = {0};\n")
+parts.append("static const size_t ps4_res_user_css_len = 0;\n")
+
+(root / "frontends/framebuffer/ps4_resource_data.h").write_text(
+    "".join(parts), encoding="utf-8"
+)
+
+p = root / "frontends/framebuffer/fetch.c"
+src = p.read_text()
+
+inc = '#include "framebuffer/fetch.h"\n'
+if "ps4_resource_data.h" not in src:
+    src = src.replace(
+        inc,
+        inc + '#ifdef ORBIS\n#include "framebuffer/ps4_resource_data.h"\n#endif\n'
+    )
+
+anchor = "/* table for fetch operations */"
+impl = r'''
+#ifdef ORBIS
+static nserror
+ps4_get_resource_data(const char *path,
+                      const uint8_t **data,
+                      size_t *data_len)
+{
+    if (strcmp(path, "default.css") == 0) {
+        *data = ps4_res_default_css;
+        *data_len = ps4_res_default_css_len;
+        return NSERROR_OK;
+    }
+    if (strcmp(path, "adblock.css") == 0) {
+        *data = ps4_res_adblock_css;
+        *data_len = ps4_res_adblock_css_len;
+        return NSERROR_OK;
+    }
+    if (strcmp(path, "quirks.css") == 0) {
+        *data = ps4_res_quirks_css;
+        *data_len = ps4_res_quirks_css_len;
+        return NSERROR_OK;
+    }
+    if (strcmp(path, "internal.css") == 0) {
+        *data = ps4_res_internal_css;
+        *data_len = ps4_res_internal_css_len;
+        return NSERROR_OK;
+    }
+    if (strcmp(path, "user.css") == 0) {
+        *data = ps4_res_user_css;
+        *data_len = ps4_res_user_css_len;
+        return NSERROR_OK;
+    }
+
+    return NSERROR_NOT_FOUND;
+}
+
+static nserror
+ps4_release_resource_data(const uint8_t *data)
+{
+    (void)data;
+    return NSERROR_OK;
+}
+#endif
+
+'''
+if "ps4_get_resource_data" not in src:
+    src = src.replace(anchor, impl + anchor)
+
+old = '''static struct gui_fetch_table fetch_table = {
+\t.filetype = fetch_filetype,
+
+\t.get_resource_url = get_resource_url,
+};'''
+new = '''static struct gui_fetch_table fetch_table = {
+\t.filetype = fetch_filetype,
+
+\t.get_resource_url = get_resource_url,
+#ifdef ORBIS
+\t.get_resource_data = ps4_get_resource_data,
+\t.release_resource_data = ps4_release_resource_data,
+#endif
+};'''
+if old not in src:
+    raise SystemExit("framebuffer fetch table shape changed")
+src = src.replace(old, new)
+
+p.write_text(src)
+PY
+
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
