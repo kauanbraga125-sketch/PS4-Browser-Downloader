@@ -237,7 +237,7 @@ test -s nsfb
 mkdir -p "$ROOT/build/independent"
 cp nsfb "$ROOT/build/independent/netsurf-ps4.elf"
 mkdir -p "$ROOT/build/independent/res"
-cp -a frontends/framebuffer/res/. "$ROOT/build/independent/res/"
+cp -aL frontends/framebuffer/res/. "$ROOT/build/independent/res/"
 
 echo "SUCCESS: $ROOT/build/independent/netsurf-ps4.elf"
 file "$ROOT/build/independent/netsurf-ps4.elf" || true
