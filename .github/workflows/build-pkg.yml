@@ -24,7 +24,7 @@ jobs:
           git -C third_party/ezremote-server checkout 7967905c5d7928ce1888f9c6c34cd6510d97ad77
 
       - name: Build background daemon
-        uses: Scene-Collective/ps4-payload-sdk@v1
+        uses: Scene-Collective/ps4-payload-sdk@v1.0.0
         with:
           app_path: third_party/ezremote-server
           build_command: |
