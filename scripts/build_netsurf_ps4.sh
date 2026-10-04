@@ -144,7 +144,10 @@ p = Path("content/fetch.c")
 s = p.read_text()
 inc = '#include "content/fetchers/curl.h"'
 if '#include "content/fetchers/ps4.h"' not in s:
-    s = s.replace(inc, inc + '\n#include "content/fetchers/ps4.h"')
+    s = s.replace(
+        inc,
+        '#ifdef WITH_CURL\n#include "content/fetchers/curl.h"\n#endif\n#include "content/fetchers/ps4.h"'
+    )
 
 needle = "nserror fetcher_init(void)\n{\n\tnserror ret;\n"
 replacement = (
