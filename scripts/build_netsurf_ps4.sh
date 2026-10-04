@@ -713,7 +713,6 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	ps4_show_network_probe_dialog();
 	feurl = "https://www.google.com/";
 #endif
 
