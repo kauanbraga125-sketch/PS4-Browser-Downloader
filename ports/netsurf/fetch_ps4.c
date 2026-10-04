@@ -38,9 +38,9 @@
 #include "content/fetch.h"
 #include "content/fetchers.h"
 
-#define PS4_NET_POOL_SIZE   (256 * 1024)
-#define PS4_HTTP_POOL_SIZE  (512 * 1024)
-#define PS4_SSL_POOL_SIZE   (512 * 1024)
+#define PS4_NET_POOL_SIZE   (128 * 1024)
+#define PS4_HTTP_POOL_SIZE  (1024 * 1024)
+#define PS4_SSL_POOL_SIZE   (1024 * 1024)
 #define PS4_READ_CHUNK      (64 * 1024)
 #define PS4_HTTP_TIMEOUT_US  (10 * 1000 * 1000)
 #define PS4_USER_AGENT      "Mozilla/5.0 (PlayStation 4; NetSurf PS4) NetSurf/PS4"
