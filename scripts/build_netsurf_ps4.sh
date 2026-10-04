@@ -191,12 +191,14 @@ python3 - <<'PY'
 from pathlib import Path
 p = Path("content/handlers/javascript/duktape/duk_config.h")
 s = p.read_text()
-old = """#if defined(DUK_F_ORBIS)
-/* --- Orbis (PS4) --- */
+old = """#elif defined(DUK_F_ORBIS)
+/* --- Orbis --- */
+/* Orbis = PS4 */
 #define DUK_USE_DATE_NOW_GETTIMEOFDAY
 #define DUK_USE_DATE_TZO_GMTIME_S"""
-new = """#if defined(DUK_F_ORBIS)
-/* --- Orbis (PS4) --- */
+new = """#elif defined(DUK_F_ORBIS)
+/* --- Orbis --- */
+/* Orbis = PS4 */
 #define DUK_USE_DATE_NOW_GETTIMEOFDAY
 #define DUK_USE_DATE_TZO_GMTIME_R"""
 if old not in s:
