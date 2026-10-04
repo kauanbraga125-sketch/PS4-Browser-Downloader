@@ -39,6 +39,35 @@ jobs:
           chmod +x scripts/build_netsurf_ps4.sh
           scripts/build_netsurf_ps4.sh
 
+      - name: Package independent PS4 PKG
+        run: |
+          set -euxo pipefail
+          chmod +x scripts/package_netsurf_ps4.sh
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          docker run --rm --user 0:0 \
+            --env OO_PS4_TOOLCHAIN=/opt/openorbis \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$OO_PS4_TOOLCHAIN:/opt/openorbis" \
+            --workdir /work ubuntu:20.04 bash -lc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends libicu66 libssl1.1 ca-certificates python3 findutils
+              chmod +x /opt/openorbis/bin/linux/* || true
+              scripts/package_netsurf_ps4.sh
+            '
+          test -s PS4_Browser_NetSurf_PoC_v1.0.pkg
+          sha256sum -c PS4_Browser_NetSurf_PoC_v1.0.pkg.sha256
+
+      - name: Upload independent PKG
+        uses: actions/upload-artifact@v4
+        with:
+          name: PS4-Browser-NetSurf-PoC
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            PS4_Browser_NetSurf_PoC_v1.0.pkg
+            PS4_Browser_NetSurf_PoC_v1.0.pkg.sha256
+
       - name: Upload cross-build
         uses: actions/upload-artifact@v4
         with:
