@@ -505,7 +505,6 @@ static UrlProbe probe_url(const std::string& input, const std::string& referer =
         if (!referer.empty()) sceHttpAddRequestHeader(req, "Referer", referer.c_str(), 1);
         sceHttpSetConnectTimeOut(req, 15 * 1000 * 1000);
         sceHttpSetResolveTimeOut(req, 15 * 1000 * 1000);
-        sceHttpSetRecvTimeOut(req, 20 * 1000 * 1000);
 
         int32_t r = sceHttpSendRequest(req, nullptr, 0);
         if (r < 0) {

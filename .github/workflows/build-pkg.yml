@@ -16,28 +16,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch background daemon source
-        run: |
-          set -euxo pipefail
-          mkdir -p third_party
-          git clone --no-checkout https://github.com/cy33hc/ps4-ezremote-server.git third_party/ezremote-server
-          git -C third_party/ezremote-server checkout 7967905c5d7928ce1888f9c6c34cd6510d97ad77
-
-      - name: Build background daemon
-        uses: Scene-Collective/ps4-payload-sdk@v1.0.0
-        with:
-          app_path: third_party/ezremote-server
-          build_command: |
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-            cmake --build build -j2
-            mkdir -p ../../daemon
-            cp build/ezremote-server-1.06.elf ../../daemon/daemon.elf
-
-      - name: Verify background daemon
-        run: |
-          test -s daemon/daemon.elf
-          sha256sum daemon/daemon.elf
-
       - name: Install host dependencies
         run: |
           sudo apt-get update -qq
@@ -58,6 +36,34 @@ jobs:
           LINK_X=$(find "$GITHUB_WORKSPACE/.openorbis" -type f -name link.x -print -quit)
           test -n "$LINK_X"
           echo "OO_PS4_TOOLCHAIN=$(dirname "$LINK_X")" >> "$GITHUB_ENV"
+
+      - name: Fetch ezRemote v2.06 daemon donor
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-all-errors \
+            https://github.com/cy33hc/ps4-ezremote-client/releases/download/2.06/ezremote_client.pkg \
+            -o ezremote_client.pkg
+          echo 'e09a84d193fdefd4e23378b089a0bbe76a51042bf2bd6f8d417716d6262f42f8  ezremote_client.pkg' | sha256sum -c -
+
+      - name: Extract background daemon
+        run: |
+          set -euxo pipefail
+          rm -rf ezremote_extract daemon
+          mkdir -p ezremote_extract daemon
+          docker run --rm --user 0:0 \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$OO_PS4_TOOLCHAIN:/opt/openorbis" \
+            --workdir /work ubuntu:20.04 bash -lc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends libicu66 libssl1.1 ca-certificates
+              /opt/openorbis/bin/linux/PkgTool.Core pkg_extract --verbose /work/ezremote_client.pkg /work/ezremote_extract
+            '
+          DAEMON_SRC=$(find ezremote_extract -type f -name daemon.elf -print -quit)
+          test -n "$DAEMON_SRC"
+          cp "$DAEMON_SRC" daemon/daemon.elf
+          test -s daemon/daemon.elf
+          sha256sum daemon/daemon.elf
 
       - name: Compile eboot
         run: |
