@@ -87,3 +87,19 @@ Variáveis opcionais no PC:
 - PBDL_FRAME_PORT
 
 Para máxima fluidez, mantenha os padrões 960x540 / qualidade 35.
+
+
+## v7.8 Native JPEG
+
+O cliente tenta decodificar os frames JPEG com libSceJpegDec do proprio PS4.
+stb_image fica apenas como fallback se o decoder nativo nao estiver disponivel.
+
+Preset MAX FPS padrao:
+- 854x480
+- JPEG qualidade 32
+- stream TCP persistente 32125
+- upscale para 1920x1080 via Piglet/GLES
+
+Para priorizar nitidez no PC, execute start_windows_quality.bat:
+- 960x540
+- JPEG qualidade 38

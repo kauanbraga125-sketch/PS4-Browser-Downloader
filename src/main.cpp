@@ -287,7 +287,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -1337,7 +1337,7 @@ static bool http_get_bytes_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1424,7 +1424,7 @@ static bool http_post_json_native(const std::string& url,
     if (!init_network()) return false;
 
     const int tmpl = sceHttpCreateTemplate(
-        g_http, "PS4HybridBrowser/7.7", ORBIS_HTTP_VERSION_1_1, 1);
+        g_http, "PS4HybridBrowser/7.8", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) return false;
 
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
@@ -1556,6 +1556,232 @@ static bool open_url_ime(std::string& value) {
     return !value.empty();
 }
 
+
+struct NativeJpegParseParam {
+    const void* jpegMemAddr;
+    uint32_t jpegMemSize;
+    uint16_t decodeMode;
+    uint16_t downScale;
+};
+
+struct NativeJpegImageInfo {
+    uint32_t imageWidth;
+    uint32_t imageHeight;
+    uint16_t colorSpace;
+    uint16_t componentNumber;
+    uint8_t componentId[4];
+    uint8_t samplingFactor[4];
+    uint32_t coefficientMemSize;
+    uint32_t suitableCscAttribute;
+    uint32_t outputImageWidth;
+    uint32_t outputImageHeight;
+};
+
+struct NativeJpegCreateParam {
+    uint32_t thisSize;
+    uint32_t attribute;
+    uint32_t maxImageWidth;
+};
+
+struct NativeJpegDecodeParam {
+    const void* jpegMemAddr;
+    void* imageMemAddr;
+    void* coefficientMemAddr;
+    uint32_t jpegMemSize;
+    uint32_t imageMemSize;
+    uint32_t coefficientMemSize;
+    uint16_t decodeMode;
+    uint16_t downScale;
+    uint16_t pixelFormat;
+    uint16_t alphaValue;
+    uint32_t imagePitch;
+};
+
+struct NativeJpegDecoder {
+    int32_t module = -1;
+    void* handle = nullptr;
+    void* work = nullptr;
+    uint32_t workSize = 0;
+    uint32_t attribute = 0;
+    uint32_t maxImageWidth = 0;
+    bool available = false;
+
+    using ParseFn = int32_t (*)(const NativeJpegParseParam*, NativeJpegImageInfo*);
+    using QueryFn = int32_t (*)(const NativeJpegCreateParam*);
+    using CreateFn = int32_t (*)(const NativeJpegCreateParam*, void*, uint32_t, void**);
+    using DecodeFn = int32_t (*)(void*, const NativeJpegDecodeParam*, NativeJpegImageInfo*);
+    using DeleteFn = int32_t (*)(void*);
+
+    ParseFn parse = nullptr;
+    QueryFn query = nullptr;
+    CreateFn create = nullptr;
+    DecodeFn decode = nullptr;
+    DeleteFn destroy = nullptr;
+};
+
+static void native_jpeg_reset_handle(NativeJpegDecoder& d) {
+    if (d.handle && d.destroy)
+        (void)d.destroy(d.handle);
+    d.handle = nullptr;
+    if (d.work) std::free(d.work);
+    d.work = nullptr;
+    d.workSize = 0;
+    d.attribute = 0;
+    d.maxImageWidth = 0;
+}
+
+static bool native_jpeg_init(NativeJpegDecoder& d) {
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_JPEG_DEC);
+    d.module = load_system_module("libSceJpegDec.sprx");
+    if (d.module < 0) {
+        append_diag("JPEG_NATIVE", "module indisponivel; usando stb fallback");
+        return false;
+    }
+
+    auto sym = [&](const char* name, void** out) -> bool {
+        return sceKernelDlsym(d.module, name, out) >= 0 && *out;
+    };
+
+    if (!sym("sceJpegDecParseHeader", reinterpret_cast<void**>(&d.parse)) ||
+        !sym("sceJpegDecQueryMemorySize", reinterpret_cast<void**>(&d.query)) ||
+        !sym("sceJpegDecCreate", reinterpret_cast<void**>(&d.create)) ||
+        !sym("sceJpegDecDecode", reinterpret_cast<void**>(&d.decode)) ||
+        !sym("sceJpegDecDelete", reinterpret_cast<void**>(&d.destroy))) {
+        append_diag("JPEG_NATIVE", "simbolos ausentes; usando stb fallback");
+        return false;
+    }
+
+    d.available = true;
+    append_diag("JPEG_NATIVE", "libSceJpegDec ativo");
+    return true;
+}
+
+static bool native_jpeg_ensure_handle(NativeJpegDecoder& d,
+                                      const NativeJpegImageInfo& info) {
+    if (!d.available) return false;
+
+    const uint32_t attribute =
+        info.suitableCscAttribute == 2 ? 2u : 1u;
+    const uint32_t maxWidth =
+        info.imageWidth ? info.imageWidth : info.outputImageWidth;
+
+    if (d.handle &&
+        d.attribute == attribute &&
+        d.maxImageWidth == maxWidth)
+        return true;
+
+    native_jpeg_reset_handle(d);
+
+    NativeJpegCreateParam createParam{};
+    createParam.thisSize = sizeof(createParam);
+    createParam.attribute = attribute;
+    createParam.maxImageWidth = maxWidth;
+
+    const int32_t size = d.query(&createParam);
+    if (size <= 0 || size > 32 * 1024 * 1024) return false;
+
+    d.work = std::malloc(static_cast<size_t>(size));
+    if (!d.work) return false;
+    d.workSize = static_cast<uint32_t>(size);
+
+    if (d.create(&createParam, d.work, d.workSize, &d.handle) < 0 ||
+        !d.handle) {
+        native_jpeg_reset_handle(d);
+        return false;
+    }
+
+    d.attribute = attribute;
+    d.maxImageWidth = maxWidth;
+    return true;
+}
+
+static stbi_uc* decode_jpeg_native_or_stb(NativeJpegDecoder& d,
+                                          const uint8_t* jpeg,
+                                          size_t jpegSize,
+                                          int& width,
+                                          int& height,
+                                          bool& usedNative) {
+    width = 0;
+    height = 0;
+    usedNative = false;
+
+    if (d.available && jpeg && jpegSize > 0 &&
+        jpegSize <= static_cast<size_t>(UINT32_MAX)) {
+        NativeJpegParseParam parseParam{};
+        parseParam.jpegMemAddr = jpeg;
+        parseParam.jpegMemSize = static_cast<uint32_t>(jpegSize);
+        parseParam.decodeMode = 0;
+        parseParam.downScale = 1;
+
+        NativeJpegImageInfo info{};
+        const int32_t parsed = d.parse(&parseParam, &info);
+        if (parsed >= 0 &&
+            info.outputImageWidth > 0 &&
+            info.outputImageHeight > 0 &&
+            info.outputImageWidth <= 1920 &&
+            info.outputImageHeight <= 1080 &&
+            native_jpeg_ensure_handle(d, info)) {
+
+            const uint64_t bytes64 =
+                static_cast<uint64_t>(info.outputImageWidth) *
+                static_cast<uint64_t>(info.outputImageHeight) * 4ULL;
+
+            if (bytes64 > 0 && bytes64 <= 16ULL * 1024ULL * 1024ULL) {
+                stbi_uc* image = static_cast<stbi_uc*>(
+                    std::malloc(static_cast<size_t>(bytes64)));
+                void* coefficient = nullptr;
+
+                if (image && info.coefficientMemSize > 0)
+                    coefficient = std::malloc(info.coefficientMemSize);
+
+                if (image &&
+                    (info.coefficientMemSize == 0 || coefficient)) {
+                    NativeJpegDecodeParam dp{};
+                    dp.jpegMemAddr = jpeg;
+                    dp.imageMemAddr = image;
+                    dp.coefficientMemAddr = coefficient;
+                    dp.jpegMemSize = static_cast<uint32_t>(jpegSize);
+                    dp.imageMemSize = static_cast<uint32_t>(bytes64);
+                    dp.coefficientMemSize = info.coefficientMemSize;
+                    dp.decodeMode = 0;
+                    dp.downScale = 1;
+                    dp.pixelFormat = 0; // R8G8B8A8
+                    dp.alphaValue = 255;
+                    dp.imagePitch = info.outputImageWidth * 4;
+
+                    NativeJpegImageInfo outInfo{};
+                    const int32_t decoded =
+                        d.decode(d.handle, &dp, &outInfo);
+
+                    if (coefficient) std::free(coefficient);
+
+                    if (decoded >= 0) {
+                        width = static_cast<int>(info.outputImageWidth);
+                        height = static_cast<int>(info.outputImageHeight);
+                        usedNative = true;
+                        return image;
+                    }
+                } else if (coefficient) {
+                    std::free(coefficient);
+                }
+
+                if (image) std::free(image);
+            }
+        }
+    }
+
+    int channels = 0;
+    stbi_uc* fallback = stbi_load_from_memory(
+        jpeg, static_cast<int>(jpegSize),
+        &width, &height, &channels, 4);
+    return fallback;
+}
+
+static void native_jpeg_shutdown(NativeJpegDecoder& d) {
+    native_jpeg_reset_handle(d);
+    d.available = false;
+}
+
 struct FrameWorker {
     std::string backend;
     pthread_t thread{};
@@ -1570,6 +1796,9 @@ struct FrameWorker {
     int height = 0;
     uint64_t generation = 0;
     bool everLoaded = false;
+    NativeJpegDecoder jpegDecoder;
+    uint64_t nativeDecodedFrames = 0;
+    uint64_t fallbackDecodedFrames = 0;
 };
 
 static bool parse_http_backend(const std::string& backend,
@@ -1641,6 +1870,8 @@ static int connect_frame_stream(const std::string& backend) {
 
 static void* frame_worker_main(void* arg) {
     FrameWorker* worker = static_cast<FrameWorker*>(arg);
+    (void)native_jpeg_init(worker->jpegDecoder);
+
     std::vector<uint8_t> jpeg;
     jpeg.reserve(512 * 1024);
 
@@ -1676,14 +1907,22 @@ static void* frame_worker_main(void* arg) {
             if (!recv_exact_frame(fd, jpeg.data(), jpeg.size(), &worker->stop))
                 break;
 
-            int w = 0, h = 0, channels = 0;
-            stbi_uc* pixels = stbi_load_from_memory(
-                jpeg.data(), static_cast<int>(jpeg.size()),
-                &w, &h, &channels, 4);
+            int w = 0, h = 0;
+            bool usedNative = false;
+            stbi_uc* pixels = decode_jpeg_native_or_stb(
+                worker->jpegDecoder,
+                jpeg.data(), jpeg.size(),
+                w, h, usedNative);
+
             if (!pixels || w <= 0 || h <= 0) {
                 if (pixels) stbi_image_free(pixels);
                 continue;
             }
+
+            if (usedNative)
+                worker->nativeDecodedFrames++;
+            else
+                worker->fallbackDecodedFrames++;
 
             pthread_mutex_lock(&worker->mutex);
             if (worker->pendingPixels)
@@ -1707,6 +1946,10 @@ static void* frame_worker_main(void* arg) {
     }
 
     worker->socketFd = -1;
+    append_diag("JPEG_NATIVE_STATS",
+                "native=" + std::to_string(worker->nativeDecodedFrames) +
+                " fallback=" + std::to_string(worker->fallbackDecodedFrames));
+    native_jpeg_shutdown(worker->jpegDecoder);
     return nullptr;
 }
 
@@ -2295,7 +2538,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.7 max performance");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.8 native jpeg");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -2340,7 +2583,7 @@ int main() {
         clean_exit_to_shell();
     }
 
-    notify_user("Hybrid v7.7 MAX: X clicar | O voltar | R2 URL | L2 Google | Options sair");
+    notify_user("Hybrid v7.8 NATIVE JPEG: X clicar | O voltar | R2 URL | L2 Google | Options sair");
 
     float cursorX = SCREEN_W * 0.5f;
     float cursorY = SCREEN_H * 0.5f;

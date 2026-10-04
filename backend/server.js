@@ -13,9 +13,9 @@ const HTTP_PORT = Number(process.env.PBDL_HTTP_PORT || 32124);
 const DISCOVERY_PORT = Number(process.env.PBDL_DISCOVERY_PORT || 32123);
 const FRAME_PORT = Number(process.env.PBDL_FRAME_PORT || (HTTP_PORT + 1));
 const VIEWPORT = { width: 1280, height: 720 };
-const STREAM_WIDTH = Number(process.env.PBDL_STREAM_WIDTH || 960);
-const STREAM_HEIGHT = Number(process.env.PBDL_STREAM_HEIGHT || 540);
-const STREAM_QUALITY = Number(process.env.PBDL_STREAM_QUALITY || 35);
+const STREAM_WIDTH = Number(process.env.PBDL_STREAM_WIDTH || 854);
+const STREAM_HEIGHT = Number(process.env.PBDL_STREAM_HEIGHT || 480);
+const STREAM_QUALITY = Number(process.env.PBDL_STREAM_QUALITY || 32);
 
 let browser = null;
 let context = null;
@@ -40,8 +40,10 @@ function sendFrameToClient(socket, frame, seq) {
   header.write("PBDL", 0, 4, "ascii");
   header.writeUInt32BE((seq >>> 0), 4);
   header.writeUInt32BE(frame.length >>> 0, 8);
+  socket.cork();
   socket.write(header);
   socket.write(frame);
+  socket.uncork();
 }
 
 function broadcastFrame(frame, seq) {
@@ -181,7 +183,13 @@ async function ensurePage() {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
-      args: ["--disable-dev-shm-usage", "--disable-background-timer-throttling"]
+      args: [
+        "--disable-dev-shm-usage",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+        "--disable-backgrounding-occluded-windows",
+        "--force-device-scale-factor=1"
+      ]
     });
   }
   if (!context) {
@@ -333,7 +341,7 @@ app.get("/ps4", function(req, res) {
   });
 });
 app.get("/health", function(_req, res) {
-  res.json({ ok: true, version: "7.7.0", framePort: FRAME_PORT, stream: STREAM_WIDTH + "x" + STREAM_HEIGHT });
+  res.json({ ok: true, version: "7.8.0", framePort: FRAME_PORT, stream: STREAM_WIDTH + "x" + STREAM_HEIGHT });
 });
 app.get("/shot", async function(_req, res) {
   try {
