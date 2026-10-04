@@ -410,12 +410,21 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
      */
     static const char* homeUrl = "https://www.google.com/?hl=pt-BR";
     const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : homeUrl;
-    static const char* callbackRegex = "^(https://www\\.superpsx\\.com/ps4-fake-pkgs-game-list/?|https?://.*\\.pkg([?#].*)?)$";
+    static const char* callbackRegexDefault =
+        "^(https://www\\.superpsx\\.com/ps4-fake-pkgs-game-list/?|https?://.*\\.pkg([?#].*)?)$";
+    static const char* callbackRegexPkgOnly =
+        "^https?://.*\\.pkg([?#].*)?$";
+
+    const bool openingSuperPsxGames =
+        requestedUrl &&
+        std::strncmp(requestedUrl,
+                     "https://www.superpsx.com/ps4-fake-pkgs-game-list",
+                     54) == 0;
 
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
     cb.type = CALLBACK_TYPE_REGEXP;
-    cb.data = callbackRegex;
+    cb.data = openingSuperPsxGames ? callbackRegexPkgOnly : callbackRegexDefault;
 
     BrowserParam p{};
     p.baseParam.size = sizeof(CommonDialogBaseParam);
@@ -505,7 +514,8 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     // IMPORTANT: do not call sceWebBrowserDialogClose() after FINISHED/GetResult.
 
     if (!captured.empty()) {
-        if (captured.find("https://www.superpsx.com/ps4-fake-pkgs-game-list") == 0) {
+        if (!openingSuperPsxGames &&
+            captured.find("https://www.superpsx.com/ps4-fake-pkgs-game-list") == 0) {
             g_status = "Abrindo lista PS4 do SuperPSX diretamente...";
             return open_browser_and_wait(captured.c_str());
         }
@@ -515,7 +525,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
         }
     }
 
-    g_status = "Navegador fechado";
+    g_status = "Navegador fechado - v4.4.1";
     return true;
 }
 

@@ -1,4 +1,4 @@
-name: Build PS4 WebKit Browser v4.4 System Exit
+name: Build PS4 WebKit Browser v4.4.1 System Exit
 
 on:
   push:
@@ -58,15 +58,15 @@ jobs:
               apt-get install -y --no-install-recommends make libicu66 libssl1.1 ca-certificates python3
               make IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg
             '
-          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_4_SystemExit.pkg
-          sha256sum PS4_Browser_WebKit_v4_4_SystemExit.pkg > PS4_Browser_WebKit_v4_4_SystemExit.pkg.sha256
+          cp IV0000-PBDL00001_00-PS4BROWSERDL0001.pkg PS4_Browser_WebKit_v4_4_1_SystemExit.pkg
+          sha256sum PS4_Browser_WebKit_v4_4_1_SystemExit.pkg > PS4_Browser_WebKit_v4_4_1_SystemExit.pkg.sha256
 
       - name: Upload PKG
         uses: actions/upload-artifact@v4
         with:
-          name: PS4-Browser-WebKit-v4-4-SystemExit
+          name: PS4-Browser-WebKit-v4-4-1-SystemExit
           retention-days: 14
           if-no-files-found: error
           path: |
-            PS4_Browser_WebKit_v4_4_SystemExit.pkg
-            PS4_Browser_WebKit_v4_4_SystemExit.pkg.sha256
+            PS4_Browser_WebKit_v4_4_1_SystemExit.pkg
+            PS4_Browser_WebKit_v4_4_1_SystemExit.pkg.sha256
