@@ -804,7 +804,7 @@ dim_new = """	if (optind < argc) {
 #ifdef ORBIS
 	fewidth = 1920;
 	feheight = 1080;
-	feurl = "https://www.google.com/";
+	feurl = "about:welcome";
 #endif
 
 	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
@@ -908,37 +908,101 @@ cat > frontends/framebuffer/res/welcome.html <<'EOF'
 <html>
 <head>
 <meta charset="utf-8">
-<title>NetSurf PS4 - Teste de Rede</title>
+<title>PS4 Browser</title>
 <style>
-html,body { margin:0; padding:0; background:#101820; color:#fff; font-family:sans-serif; }
-main { width:88%; margin:40px auto; }
-h1 { font-size:52px; margin:0 0 20px; }
-p { font-size:30px; line-height:1.4; }
-a {
-  display:block;
-  margin:30px 0;
-  padding:38px;
-  background:#f2f2f2;
-  color:#111;
-  text-decoration:none;
-  font-size:40px;
-  border:4px solid #777;
+html,body {
+  margin:0;
+  padding:0;
+  width:100%;
+  height:100%;
+  background:#ffffff;
+  color:#202124;
+  font-family:sans-serif;
 }
-small { font-size:24px; }
+main {
+  width:82%;
+  margin:0 auto;
+  padding-top:120px;
+  text-align:center;
+}
+h1 {
+  font-size:72px;
+  font-weight:600;
+  margin:0 0 20px;
+}
+.subtitle {
+  font-size:28px;
+  color:#5f6368;
+  margin-bottom:48px;
+}
+form {
+  width:100%;
+}
+input[type=text] {
+  width:86%;
+  height:74px;
+  padding:0 28px;
+  font-size:32px;
+  border:2px solid #dfe1e5;
+  border-radius:36px;
+  background:#fff;
+  color:#202124;
+}
+input[type=submit] {
+  margin-top:30px;
+  padding:20px 42px;
+  font-size:28px;
+  border:1px solid #dadce0;
+  border-radius:10px;
+  background:#f8f9fa;
+  color:#202124;
+}
+.help {
+  margin-top:60px;
+  font-size:22px;
+  color:#5f6368;
+  line-height:1.5;
+}
+.quick {
+  margin-top:42px;
+}
+.quick a {
+  display:inline-block;
+  margin:10px 18px;
+  padding:14px 22px;
+  border:1px solid #dadce0;
+  border-radius:10px;
+  text-decoration:none;
+  color:#1a73e8;
+  font-size:24px;
+}
 </style>
 </head>
 <body>
 <main>
-<h1>NetSurf PS4</h1>
-<p>O motor abriu. Agora teste a rede sem precisar digitar.</p>
-<a href="http://example.com/">TESTAR HTTP</a>
-<a href="https://example.com/">TESTAR HTTPS</a>
-<p><small>Use o analogico para mover a seta e X para clicar.</small></p>
+  <h1>PS4 Browser</h1>
+  <div class="subtitle">Pesquise e abra sites sem depender de JavaScript</div>
+
+  <form action="https://html.duckduckgo.com/html/" method="get">
+    <input type="text" name="q" placeholder="Pesquisar na web" autofocus>
+    <br>
+    <input type="submit" value="Pesquisar">
+  </form>
+
+  <div class="quick">
+    <a href="https://www.wikipedia.org/">Wikipedia</a>
+    <a href="https://github.com/">GitHub</a>
+    <a href="https://www.google.com/">Google</a>
+  </div>
+
+  <div class="help">
+    X: clicar / abrir teclado &nbsp;&nbsp;•&nbsp;&nbsp; O: voltar<br>
+    A busca usa uma página HTML compatível com navegadores sem JavaScript.
+  </div>
 </main>
 </body>
 </html>
 EOF
-
 
 
 # PS4 image handler: use stb_image from OpenOrbis for the common web formats
