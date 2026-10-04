@@ -2,9 +2,9 @@
 set -euo pipefail
 
 # Reproducible first-stage NetSurf -> PS4 cross build.
-# This intentionally starts with a reduced feature set (no JS/images/video)
-# so the first hardware milestone is a real HTML/CSS browser, not a mock UI.
-# Once this links and runs on hardware, features are re-enabled one by one.
+# Milestone 1 deliberately disables optional JS/image/video support.
+# The produced program is still the real NetSurf HTML/CSS engine and does not
+# invoke sceWebBrowserDialog or the Sony browser.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 : "${OO_PS4_TOOLCHAIN:?OO_PS4_TOOLCHAIN must point to OpenOrbis/PS4Toolchain}"
@@ -21,9 +21,11 @@ rm -rf "$WORK"
 mkdir -p "$SRC" "$PREFIX" "$TOOLS"
 
 fetch_repo() {
-    local repo="$1" sha="$2" dst="$3"
+    local repo="$1"
+    local sha="$2"
+    local dst="$3"
     echo "==> fetch $repo @ $sha"
-    curl -fL --retry 5 --retry-all-errors       "https://github.com/${repo}/archive/${sha}.tar.gz"       -o "$WORK/${dst}.tar.gz"
+    curl -fL --retry 5 --retry-all-errors "https://github.com/${repo}/archive/${sha}.tar.gz" -o "$WORK/${dst}.tar.gz"
     mkdir -p "$SRC/$dst"
     tar xzf "$WORK/${dst}.tar.gz" -C "$SRC/$dst" --strip-components=1
 }
@@ -51,15 +53,15 @@ cat > "$TOOLS/ps4-gcc" <<EOF
 set -e
 compile=0
 for a in "\$@"; do
-  case "\$a" in
-    -c|-E|-S|-M|-MM|-MMD) compile=1 ;;
-  esac
+    case "\$a" in
+        -c|-E|-S|-M|-MM|-MMD) compile=1 ;;
+    esac
 done
 COMMON=(--target=$HOST -fPIC -funwind-tables -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include" -I"$PREFIX/include" -I"$ROOT/ports/compat")
 if [[ "\$compile" == 1 ]]; then
-  exec clang-18 "\${COMMON[@]}" "\$@"
+    exec clang-18 "${COMMON[@]}" "\$@"
 fi
-exec clang-18 "\${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
+exec clang-18 "${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
 EOF
 chmod +x "$TOOLS/ps4-gcc"
 
@@ -69,7 +71,6 @@ exec "$TOOLS/ps4-gcc" -isystem "$OO_PS4_TOOLCHAIN/include/c++/v1" "\$@" -lc++
 EOF
 chmod +x "$TOOLS/ps4-g++"
 
-# The NetSurf build system detects *gcc/*g++ under GCCSDK_INSTALL_CROSSBIN.
 ln -sf ps4-gcc "$TOOLS/$HOST-gcc"
 ln -sf ps4-g++ "$TOOLS/$HOST-g++"
 
@@ -84,10 +85,23 @@ build_lib() {
     echo
     echo "================ $name ================"
     cd "$SRC/$name"
-    # OpenOrbis' public headers are still incomplete compared with a full
-    # FreeBSD sysroot; warnings from those headers must not become hard errors.
     sed -i 's/-Werror//g' Makefile || true
-    make -j2 install       PREFIX="$PREFIX"       NSSHARED="$NSBUILD"       HOST="$HOST"       BUILD="$BUILD"       CC="$TOOLS/ps4-gcc"       CXX="$TOOLS/ps4-g++"       AR=llvm-ar-18       BUILD_CC=cc       PKGCONFIG="$TOOLS/ps4-pkg-config"       CFLAGS="$COMMON_CFLAGS"       LDFLAGS="$COMMON_LDFLAGS"
+
+    local makeargs=(
+        "PREFIX=$PREFIX"
+        "NSSHARED=$NSBUILD"
+        "HOST=$HOST"
+        "BUILD=$BUILD"
+        "CC=$TOOLS/ps4-gcc"
+        "CXX=$TOOLS/ps4-g++"
+        "AR=llvm-ar-18"
+        "BUILD_CC=cc"
+        "PKGCONFIG=$TOOLS/ps4-pkg-config"
+        "Q="
+        "VQ="
+    )
+
+    env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$COMMON_LDFLAGS" make -j2 install "${makeargs[@]}"
 }
 
 build_lib libwapcaplet
@@ -95,8 +109,6 @@ build_lib libparserutils
 build_lib libhubbub
 build_lib libcss
 
-# NetSurf requires the Hubbub DOM binding. The Expat and libxml bindings are
-# unnecessary for the browser and would pull in unrelated libraries.
 cat > "$SRC/libdom/Makefile.config.override" <<'EOF'
 WITH_LIBXML_BINDING := no
 WITH_EXPAT_BINDING := no
@@ -105,11 +117,10 @@ EOF
 build_lib libdom
 build_lib libnsutils
 
-# Replace libnsfb's SDL1-only optional surface with our SDL2/OpenOrbis surface.
+# Upstream libnsfb has an SDL 1.2 surface. Replace only that display surface
+# with the PS4 SDL2 implementation; keep the RAM surface for offscreen bitmaps.
 cp "$ROOT/ports/libnsfb/ps4_sdl2.c" "$SRC/libnsfb/src/surface/ps4_sdl2.c"
 cat > "$SRC/libnsfb/src/surface/Makefile" <<'EOF'
-# PS4 port: keep RAM surface for offscreen bitmaps and use our SDL2 surface
-# for the actual display. Do not compile the upstream SDL 1.2 backend.
 DIR_SOURCES := surface.c ram.c ps4_sdl2.c
 include $(NSBUILD)/Makefile.subdir
 EOF
@@ -131,47 +142,40 @@ p.write_text(s)
 
 p = Path("content/fetch.c")
 s = p.read_text()
-needle = '#include "content/fetchers/curl.h"'
+inc = '#include "content/fetchers/curl.h"'
 if '#include "content/fetchers/ps4.h"' not in s:
-    s = s.replace(needle, needle + '\n#include "content/fetchers/ps4.h"')
-needle = '''nserror fetcher_init(void)
-{
-\tnserror ret;
-'''
-replacement = '''nserror fetcher_init(void)
-{
-\tnserror ret;
+    s = s.replace(inc, inc + '\n#include "content/fetchers/ps4.h"')
 
-\tret = fetch_ps4_register();
-\tif (ret != NSERROR_OK) {
-\t\treturn ret;
-\t}
-'''
+needle = "nserror fetcher_init(void)\n{\n\tnserror ret;\n"
+replacement = (
+    "nserror fetcher_init(void)\n{\n\tnserror ret;\n\n"
+    "\tret = fetch_ps4_register();\n"
+    "\tif (ret != NSERROR_OK) {\n"
+    "\t\treturn ret;\n"
+    "\t}\n"
+)
 if "fetch_ps4_register();" not in s:
     s = s.replace(needle, replacement)
 p.write_text(s)
 
-# PS4-specific default framebuffer surface and resolution. Command-line
-# overrides remain possible, but hardware boots directly into our SDL2 surface.
 p = Path("frontends/framebuffer/gui.c")
 s = p.read_text()
 s = s.replace("static const char *fename;", 'static const char *fename = "ps4";')
-# Do not allow auto-selection to replace the explicit PS4 surface.
-s = s.replace(
-'''static void
+old = """static void
 framebuffer_pick_default_fename(void *ctx, const char *name, enum nsfb_type_e type)
 {
-\tif (type < fetype) {''',
-'''static void
+\tif (type < fetype) {"""
+new = """static void
 framebuffer_pick_default_fename(void *ctx, const char *name, enum nsfb_type_e type)
 {
-\tif (fename != NULL && strcmp(fename, "ps4") == 0) return;
-\tif (type < fetype) {''')
+\tif (fename != NULL && strcmp(fename, "ps4") == 0)
+\t\treturn;
+\tif (type < fetype) {"""
+s = s.replace(old, new)
 p.write_text(s)
 PY
 
-cat > Makefile.config <<EOF
-# First real-browser hardware milestone.
+cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
 override NETSURF_USE_DUKTAPE := NO
@@ -194,19 +198,16 @@ NETSURF_FB_RESPATH := /app0/res
 NETSURF_FB_FONTPATH := /app0/res
 EOF
 
-# frontends/framebuffer/Makefile.tools discovers these wrappers.
 export GCCSDK_INSTALL_ENV="$PREFIX"
 export GCCSDK_INSTALL_CROSSBIN="$TOOLS"
 
-# Our native SceHttp implementation supplies HTTP/HTTPS, so libcurl is
-# intentionally absent. SDL2 is supplied by OpenOrbis.
-make -j2 TARGET=framebuffer   CC="$TOOLS/ps4-gcc" CXX="$TOOLS/ps4-g++"   PKG_CONFIG="$TOOLS/ps4-pkg-config"   CFLAGS="$COMMON_CFLAGS"   LDFLAGS="$COMMON_LDFLAGS -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group"
+NETSURF_LDFLAGS="$COMMON_LDFLAGS -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group"
+
+env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$NETSURF_LDFLAGS" make -j2 TARGET=framebuffer "CC=$TOOLS/ps4-gcc" "CXX=$TOOLS/ps4-g++" "PKG_CONFIG=$TOOLS/ps4-pkg-config" Q= VQ=
 
 test -s nsfb
 mkdir -p "$ROOT/build/independent"
 cp nsfb "$ROOT/build/independent/netsurf-ps4.elf"
-
-# Preserve the exact resource set required by the framebuffer frontend.
 mkdir -p "$ROOT/build/independent/res"
 cp -a frontends/framebuffer/res/. "$ROOT/build/independent/res/"
 
