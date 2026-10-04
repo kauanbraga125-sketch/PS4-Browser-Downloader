@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  statuses: write
 
 jobs:
   build:
@@ -86,3 +87,18 @@ jobs:
           name: netsurf-ps4-cross-build
           path: build/independent/
           if-no-files-found: error
+
+      - name: Report v3.0 build status
+        if: ${{ success() || failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          state="failure"
+          description="NetSurf v3.0 package build failed"
+          if [ "$JOB_STATUS" = "success" ]; then
+            state="success"
+            description="NetSurf v3.0 package built successfully"
+          fi
+          gh api --method POST             "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA"             -f state="$state"             -f context="netsurf-v3.0-package"             -f description="$description"
