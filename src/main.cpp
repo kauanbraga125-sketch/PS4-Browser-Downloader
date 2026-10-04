@@ -253,7 +253,7 @@ static bool init_network() {
 
 static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
     if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/5.1.2", ORBIS_HTTP_VERSION_1_1, 1);
+    const int tmpl = sceHttpCreateTemplate(g_http, "PS4HybridBrowser/7.0", ORBIS_HTTP_VERSION_1_1, 1);
     if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
     const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
     if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
@@ -802,25 +802,10 @@ static std::string regex_escape(const std::string& in) {
     return out;
 }
 
-static std::string make_navigation_regex(const std::string& startUrl) {
-    // IMPORTANT: never capture ordinary browsing/search navigation here.
-    // A WebBrowserDialog callback FINISHES the dialog, so a universal http(s)
-    // regex makes Google search / R2 / normal links look like "close browser".
-    //
-    // Capture only destinations that need our own handling:
-    //  - SuperPSX internal navigation (reopened in the same window)
-    //  - known file hosts
-    //  - explicit download-looking paths on ROM sites
-    //  - direct file extensions
-    //  - blob/data schemes for diagnostics
-    const std::string current = regex_escape(startUrl);
-    return
-        "^(?!" + current + "$)("
-        "https?://([^/]+\\.)?(1fichier\\.com|mediafire\\.com|pixeldrain\\.com|vikingfile\\.com|akirabox\\.com)/.*|"
-        "https?://([^/]+\\.)?(romspure\\.cc|romsfun\\.co)/.*(download|/dl/|file).*|"
-        "https?://.*\\.(pkg|zip|7z|rar|iso|bin|chd|cso|pbp|rom|nes|sfc|smc|gba|gbc|gb|n64|z64|nds|3ds|cia|jpg|jpeg|png|gif|webp|bmp|mp4|mkv|avi|mov|mp3|flac|wav|pdf)([?#].*)?|"
-        "blob:.*|data:.*"
-        ")$";
+static std::string make_navigation_regex(const std::string&) {
+    // Hybrid v7 only intercepts our own explicit handoff route.
+    // Normal browsing inside the backend UI never finishes WebBrowserDialog.
+    return "^https?://[^/]+/handoff/.*$";
 }
 
 struct TextResponse {
@@ -1066,30 +1051,131 @@ static bool handle_captured_url(const std::string& captured, const std::string& 
     return false;
 }
 
+
+static std::string trim_copy(std::string v) {
+    while (!v.empty() && (v.back() == '\r' || v.back() == '\n' || v.back() == ' ' || v.back() == '\t'))
+        v.pop_back();
+    size_t i = 0;
+    while (i < v.size() && (v[i] == ' ' || v[i] == '\t' || v[i] == '\r' || v[i] == '\n'))
+        ++i;
+    if (i) v.erase(0, i);
+    return v;
+}
+
+static std::string read_small_file(const char* path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return "";
+    char buf[512];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return "";
+    buf[n] = 0;
+    return trim_copy(std::string(buf));
+}
+
+static void write_small_file(const char* path, const std::string& value) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) return;
+    (void)write(fd, value.data(), value.size());
+    close(fd);
+}
+
+static std::string discover_hybrid_backend() {
+    if (!init_network()) return read_small_file("/data/PBDL/backend.txt");
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return read_small_file("/data/PBDL/backend.txt");
+
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &one, sizeof(one));
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(32123);
+    dst.sin_addr.s_addr = inet_addr("255.255.255.255");
+
+    const char* hello = "PBDL_DISCOVER_V1";
+    std::string found;
+
+    for (int tick = 0; tick < 35 && found.empty(); ++tick) {
+        if (tick == 0 || tick == 10 || tick == 20)
+            (void)sendto(fd, hello, std::strlen(hello), 0,
+                         reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+
+        char buf[512];
+        sockaddr_in from{};
+        socklen_t fromLen = sizeof(from);
+        const ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0,
+                                   reinterpret_cast<sockaddr*>(&from), &fromLen);
+        if (n > 0) {
+            buf[n] = 0;
+            const std::string msg = trim_copy(std::string(buf));
+            const std::string prefix = "PBDL_BACKEND ";
+            if (msg.compare(0, prefix.size(), prefix) == 0) {
+                found = trim_copy(msg.substr(prefix.size()));
+                break;
+            }
+        }
+        usleep(100 * 1000);
+    }
+    close(fd);
+
+    if (!found.empty()) {
+        mkdir("/data/PBDL", 0777);
+        write_small_file("/data/PBDL/backend.txt", found);
+        append_diag("HYBRID_BACKEND", found);
+        return found;
+    }
+
+    const std::string cached = read_small_file("/data/PBDL/backend.txt");
+    if (!cached.empty()) append_diag("HYBRID_BACKEND_CACHE", cached);
+    else append_diag("HYBRID_BACKEND", "nao encontrado");
+    return cached;
+}
+
+static bool handle_hybrid_handoff(const std::string& captured,
+                                  const std::string& browserHome) {
+    const size_t pos = captured.find("/handoff/");
+    if (pos == std::string::npos) return false;
+
+    append_diag("HYBRID_HANDOFF", captured);
+    const std::string rest = captured.substr(pos + 9);
+    const bool isPkg = rest.compare(0, 4, "pkg/") == 0;
+
+    std::string fileUrl = captured;
+    fileUrl.replace(pos, 9, "/file/");
+    append_diag("HYBRID_FILE_URL", fileUrl);
+
+    if (isPkg) {
+        g_status = "Hybrid: enviando PKG ao BGFT...";
+        return queue_bgft(fileUrl);
+    }
+
+    UrlProbe probe = probe_url(fileUrl, browserHome);
+    if (!probe.ok) {
+        usleep(250 * 1000);
+        probe = probe_url(fileUrl, browserHome);
+    }
+    if (!probe.ok) {
+        g_status = "Hybrid: backend nao respondeu ao arquivo";
+        return false;
+    }
+
+    g_status = "Hybrid: enviando arquivo ao daemon...";
+    return queue_generic_background(probe);
+}
+
 static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     if (!init_browser()) return false;
 
     int32_t user = 0;
     sceUserServiceGetInitialUser(&user);
 
-    /*
-     * Use the PS4's real WebKit/browser service.  This is intentionally NOT
-     * NetSurf: modern JavaScript, cookies and the DOM are handled by the
-     * console's WebKit stack.  Default mode is tried first because it gives
-     * the browser the least restrictive system presentation (new-window,
-     * media and site UI behaviour are less constrained than our old custom
-     * rectangle).  Custom mode is only a fallback for firmwares where default
-     * presentation is unavailable to homebrew.
-     */
-    static const char* homeUrl = "https://www.google.com/?hl=pt-BR";
-    const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : homeUrl;
-    const bool hasRequestedUrl = requestedUrl && *requestedUrl;
-    const std::string startUrlString = startUrl;
-
-    // Universal navigation interceptor. Negative look-ahead excludes the page
-    // currently being opened so the initial navigation does not immediately
-    // return as a callback.
-    const std::string callbackRegex = make_navigation_regex(startUrlString);
+    static const char* fallbackHome = "https://www.google.com/?hl=pt-BR";
+    const char* startUrl = (requestedUrl && *requestedUrl) ? requestedUrl : fallbackHome;
+    const std::string callbackRegex = make_navigation_regex(startUrl);
 
     BrowserCallbackInitParam cb{};
     cb.size = sizeof(cb);
@@ -1105,34 +1191,21 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     p.url = startUrl;
     p.callbackInitParam = &cb;
 
-    g_status = "Abrindo WebKit do PS4 (modo completo)...";
+    g_status = "Hybrid v7: abrindo interface...";
     int32_t r = g_browser.open(&p);
-
-
     if (r != 0) {
-        g_status = "Browser WebKit open: " + hex32(r);
+        g_status = "Hybrid browser open: " + hex32(r);
         return false;
     }
 
-    g_status = "WebKit v5.1.2: navegacao normal; apenas downloads reais sao interceptados.";
-
-    bool finished = false;
     for (;;) {
         const int32_t st = g_browser.updateStatus();
-        if (st == DIALOG_STATUS_FINISHED) {
-            finished = true;
-            break;
-        }
+        if (st == DIALOG_STATUS_FINISHED) break;
         if (st < 0) {
-            g_status = "Browser update status: " + hex32(st);
+            g_status = "Hybrid update status: " + hex32(st);
             return false;
         }
         usleep(16 * 1000);
-    }
-
-    if (!finished) {
-        g_status = "Browser nao chegou a FINISHED";
-        return false;
     }
 
     BrowserCallbackResultParam cbout{};
@@ -1142,7 +1215,7 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
 
     r = g_browser.getResult(&result);
     if (r != 0) {
-        g_status = "Browser get result: " + hex32(r);
+        g_status = "Hybrid get result: " + hex32(r);
         return false;
     }
 
@@ -1152,20 +1225,13 @@ static bool open_browser_and_wait(const char* requestedUrl = nullptr) {
     if (captured.empty() && cbout.buffer && cbout.bufferSize)
         captured.assign(cbout.buffer, cbout.bufferSize);
 
-    // IMPORTANT: do not call sceWebBrowserDialogClose() after FINISHED/GetResult.
-
-    if (!captured.empty()) {
-        std::string reopen;
-        if (handle_captured_url(captured, startUrl, reopen)) {
-            // Download is now owned by BGFT or the persistent daemon.
-            // Reopen the page that originated the download so browsing can continue.
-            return open_browser_and_wait(startUrl);
-        }
-        if (!reopen.empty() && reopen != startUrl)
-            return open_browser_and_wait(reopen.c_str());
+    if (!captured.empty() && captured.find("/handoff/") != std::string::npos) {
+        (void)handle_hybrid_handoff(captured, startUrl);
+        // Callback intentionally finishes the dialog. Reopen our backend UI.
+        return open_browser_and_wait(startUrl);
     }
 
-    g_status = "Navegador fechado - v5.1.2";
+    g_status = "Hybrid v7 fechado normalmente";
     return true;
 }
 
@@ -1177,14 +1243,21 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Browser v5.1.2 stable navigation");
+    append_diag("BOOT", "PS4 Hybrid Browser v7");
+
     (void)start_download_daemon();
 
-    // Keep the same DEFAULT WebKit path proven on hardware.
-    (void)open_browser_and_wait();
+    std::string backend = discover_hybrid_backend();
+    if (!backend.empty()) {
+        if (backend.back() != '/') backend.push_back('/');
+        append_diag("HYBRID_OPEN", backend);
+        (void)open_browser_and_wait(backend.c_str());
+    } else {
+        // Keep the console useful even if the PC backend is not running.
+        append_diag("HYBRID_FALLBACK", "backend nao encontrado; abrindo Google local");
+        (void)open_browser_and_wait("https://www.google.com/?hl=pt-BR");
+    }
 
-    // Do not manually tear down browser/network modules here.
-    // Stable PS4 homebrew hands control back through SystemService.
     clean_exit_to_shell();
     return 0;
 }

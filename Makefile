@@ -1,5 +1,5 @@
-TITLE       := PS4 WebKit Browser v5.1.2
-VERSION     := 05.12
+TITLE       := PS4 Hybrid Browser v7.0
+VERSION     := 07.00
 TITLE_ID    := PBDL00001
 CONTENT_ID  := IV0000-PBDL00001_00-PS4BROWSERDL0001
 
