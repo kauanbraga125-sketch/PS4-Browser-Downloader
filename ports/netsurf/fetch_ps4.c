@@ -247,22 +247,61 @@ static void ps4_free(void *vctx)
     free(ctx);
 }
 
-static void ps4_emit_headers(struct ps4_http_ctx *ctx, char *headers, size_t len)
+static void ps4_emit_headers(struct ps4_http_ctx *ctx, const char *headers, size_t len)
 {
     size_t start = 0;
 
     while (start < len && !ctx->aborted) {
         size_t end = start;
-        while (end < len && headers[end] != '\n') end++;
-        if (end < len) end++;
+        size_t line_len;
+        char *line;
 
-        if (end > start) {
+        while (end < len && headers[end] != '\n')
+            end++;
+        if (end < len)
+            end++;
+
+        line_len = end - start;
+        if (line_len == 0) {
+            start = end;
+            continue;
+        }
+
+        /*
+         * NetSurf's llcache header parser uses strchr()/strlen() internally.
+         * sceHttpGetAllResponseHeaders() gives us one contiguous header blob,
+         * so a slice into that blob is NOT NUL-terminated at the end of each
+         * line.  In particular, the HTTP status line has no ':'; without a
+         * terminator NetSurf can scan into the next header and corrupt its
+         * parse.  Always hand the core an independent terminated line.
+         */
+        line = malloc(line_len + 1);
+        if (line == NULL) {
+            ps4_send_error(ctx, "PS4: out of memory while parsing headers");
+            ctx->aborted = true;
+            return;
+        }
+
+        memcpy(line, headers + start, line_len);
+        line[line_len] = '\0';
+
+        {
             fetch_msg msg;
             msg.type = FETCH_HEADER;
-            msg.data.header_or_data.buf = (const uint8_t *)(headers + start);
-            msg.data.header_or_data.len = end - start;
+            msg.data.header_or_data.buf = (const uint8_t *)line;
+            msg.data.header_or_data.len = line_len;
             ps4_send(ctx, &msg);
         }
+
+        free(line);
+
+        /*
+         * A callback can abort the fetch.  Match NetSurf's own fetchers and
+         * stop immediately instead of sending more events to an aborted job.
+         */
+        if (ctx->aborted)
+            return;
+
         start = end;
     }
 }
