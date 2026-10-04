@@ -62,7 +62,7 @@ COMMON=(--target=$HOST -fPIC -funwind-tables -isysroot "$OO_PS4_TOOLCHAIN" -isys
 if [[ "\$compile" == 1 ]]; then
     exec clang-18 "\${COMMON[@]}" "\$@"
 fi
-exec clang-18 "\${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--no-dynamic-linker -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
+exec clang-18 "\${COMMON[@]}" -fuse-ld=lld -nostdlib -Wl,-pie -Wl,--no-dynamic-linker -Wl,--script="$OO_PS4_TOOLCHAIN/link.x" -Wl,--eh-frame-hdr -L"$PREFIX/lib" -L"$OO_PS4_TOOLCHAIN/lib" "\$@" "$OO_PS4_TOOLCHAIN/lib/crt1.o" -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceImeDialog -lSceIme -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group
 EOF
 chmod +x "$TOOLS/ps4-gcc"
 
@@ -209,7 +209,7 @@ s = s.replace("static const char *fename;", 'static const char *fename = "ps4";'
 if '#include <SDL2/SDL.h>' not in s:
     s = s.replace(
         '#include <stdbool.h>',
-        '#include <stdbool.h>\n#ifdef ORBIS\n#include <SDL2/SDL.h>\n#endif'
+        '#include <stdbool.h>\n#ifdef ORBIS\n#include <SDL2/SDL.h>\n#include <orbis/ImeDialog.h>\n#include <orbis/Sysmodule.h>\n#endif'
     )
 
 diag = r'''
@@ -325,7 +325,6 @@ if 'ps4_diag_checkpoint(int stage)' not in s:
 s = s.replace(
     'main(int argc, char** argv)\n{\n\tstruct browser_window *bw;',
     'main(int argc, char** argv)\n{\n#ifdef ORBIS\n'
-    '\tif (!ps4_diag_checkpoint(1)) return 101;\n'
     '\tram_register_surface();\n'
     '\tps4_register_surface();\n'
     '#endif\n'
@@ -334,30 +333,184 @@ s = s.replace(
 
 s = s.replace(
     '\trespaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);',
-    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(2)) return 102;\n#endif\n\n'
     '\trespaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);'
 )
 
 s = s.replace(
     '\t/* common initialisation */\n\tret = netsurf_init(NULL);',
-    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(3)) return 103;\n#endif\n\n'
     '\t/* common initialisation */\n\tret = netsurf_init(NULL);'
 )
 
 s = s.replace(
     '\t/* Override, since we have no support for non-core SELECT menu */',
-    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(4)) return 104;\n#endif\n\n'
     '\t/* Override, since we have no support for non-core SELECT menu */'
 )
 
 s = s.replace(
     '\tif (process_cmdline(argc,argv) != true)\n\t\tdie("unable to process command line.\\n");',
-    '\tif (process_cmdline(argc,argv) != true)\n\t\tdie("unable to process command line.\\n");\n\n'
-    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(5)) return 105;\n'
-    '\tps4_diag_close();\n#endif'
+    '\tif (process_cmdline(argc,argv) != true)\n\t\tdie("unable to process command line.\\n");'
 )
 
 p.write_text(s)
+# PS4-native URL keyboard. The framebuffer OSK is unsuitable for a TV/controller.
+ime_anchor = """static int
+fb_url_move(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{"""
+ime_code = r'''
+#ifdef ORBIS
+static void ps4_ascii_to_utf16(const char *src, uint16_t *dst, size_t cap)
+{
+    size_t i = 0;
+    if (cap == 0) return;
+    while (src != NULL && src[i] != '\0' && i + 1 < cap) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i] = (uint16_t)c;
+        i++;
+    }
+    dst[i] = 0;
+}
+
+static void ps4_utf16_to_ascii(const uint16_t *src, char *dst, size_t cap)
+{
+    size_t i = 0;
+    if (cap == 0) return;
+    while (src[i] != 0 && i + 1 < cap) {
+        uint16_t c = src[i];
+        dst[i] = (c < 0x80) ? (char)c : '?';
+        i++;
+    }
+    dst[i] = '\0';
+}
+
+static bool ps4_open_url_keyboard(struct gui_window *gw)
+{
+    static uint16_t input[512];
+    static uint16_t title[64];
+    char output[512];
+    const char *initial = "";
+    nsurl *current = browser_window_access_url(gw->bw);
+
+    if (current != NULL)
+        initial = nsurl_access(current);
+
+    memset(input, 0, sizeof(input));
+    memset(title, 0, sizeof(title));
+    ps4_ascii_to_utf16(initial, input, 512);
+    ps4_ascii_to_utf16("Digite um endereco", title, 64);
+
+    (void)sceSysmoduleLoadModule(ORBIS_SYSMODULE_IME_DIALOG);
+
+    OrbisImeDialogSetting param;
+    memset(&param, 0, sizeof(param));
+    param.userId = 0xFE;
+    param.type = ORBIS_TYPE_TYPE_URL;
+    param.enterLabel = ORBIS_BUTTON_LABEL_GO;
+    param.maxTextLength = 510;
+    param.inputTextBuffer = (wchar_t *)input;
+    param.title = (const wchar_t *)title;
+    param.horizontalAlignment = ORBIS_H_CENTER;
+    param.verticalAlignment = ORBIS_V_CENTER;
+
+    int ret = sceImeDialogInit(&param, NULL);
+    if (ret < 0)
+        return false;
+
+    bool accepted = false;
+    for (;;) {
+        OrbisDialogStatus status = sceImeDialogGetStatus();
+        if (status == ORBIS_DIALOG_STATUS_STOPPED) {
+            OrbisDialogResult result;
+            memset(&result, 0, sizeof(result));
+            if (sceImeDialogGetResult(&result) >= 0 &&
+                result.endstatus == ORBIS_DIALOG_OK) {
+                accepted = true;
+            }
+            break;
+        }
+        if (status == ORBIS_DIALOG_STATUS_NONE)
+            break;
+        SDL_Delay(16);
+    }
+
+    sceImeDialogTerm();
+
+    if (!accepted)
+        return false;
+
+    ps4_utf16_to_ascii(input, output, sizeof(output));
+    if (output[0] == '\0')
+        return false;
+
+    fbtk_set_text(gw->url, output);
+    fb_url_enter(gw->bw, output);
+    return true;
+}
+
+static int ps4_url_click(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+    struct gui_window *gw = cbi->context;
+    (void)widget;
+
+    if (cbi->event->type != NSFB_EVENT_KEY_UP)
+        return 0;
+
+    (void)ps4_open_url_keyboard(gw);
+    return 0;
+}
+
+static int ps4_url_ignore_input(fbtk_widget_t *widget, fbtk_callback_info *cbi)
+{
+    (void)widget;
+    (void)cbi;
+    return 0;
+}
+#endif
+
+'''
+if "ps4_open_url_keyboard" not in s:
+    s = s.replace(ime_anchor, ime_code + ime_anchor)
+
+# Hook X-click on URL bar to native IME and suppress the framebuffer text input.
+url_hook = """				fbtk_set_handler(widget, 
+						 FBTK_CBT_POINTERENTER, 
+						 fb_url_move, gw->bw);
+
+				gw->url = widget; /* keep reference */"""
+url_hook_new = """				fbtk_set_handler(widget,
+						 FBTK_CBT_POINTERENTER,
+						 fb_url_move, gw->bw);
+#ifdef ORBIS
+				fbtk_set_handler(widget, FBTK_CBT_CLICK, ps4_url_click, gw);
+				fbtk_set_handler(widget, FBTK_CBT_INPUT, ps4_url_ignore_input, gw);
+#endif
+
+				gw->url = widget; /* keep reference */"""
+s = s.replace(url_hook, url_hook_new)
+
+# PS4 is always a 1080p TV framebuffer for this frontend and starts on a
+# lightweight plain-HTTP page. Once native text entry works the user can
+# navigate anywhere from the address bar.
+dim_anchor = """	if (optind < argc) {
+		feurl = argv[optind];
+	}
+
+	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
+dim_new = """	if (optind < argc) {
+		feurl = argv[optind];
+	}
+
+#ifdef ORBIS
+	fewidth = 1920;
+	feheight = 1080;
+	feurl = "http://example.com/";
+#endif
+
+	if (nsfb_type_from_name(fename) == NSFB_SURFACE_NONE) {"""
+s = s.replace(dim_anchor, dim_new)
+
+# Disable framebuffer on-screen keyboard; PS4 native IME replaces it.
+s = s.replace("\tfbtk_enable_oskb(fbtk);", "#ifndef ORBIS\n\tfbtk_enable_oskb(fbtk);\n#endif")
+
 old = """static void
 framebuffer_pick_default_fename(void *ctx, const char *name, enum nsfb_type_e type)
 {
@@ -461,7 +614,7 @@ EOF
 export GCCSDK_INSTALL_ENV="$PREFIX"
 export GCCSDK_INSTALL_CROSSBIN="$TOOLS"
 
-NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lSceVideoOut -lSceAudioOut -lScePad"
+NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lSceVideoOut -lSceAudioOut -lScePad -lSceCommonDialog -lSceImeDialog -lSceIme"
 
 env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$NETSURF_LDFLAGS" make -j2 TARGET=framebuffer "CC=$TOOLS/ps4-gcc" "CXX=$TOOLS/ps4-g++" "PKG_CONFIG=$TOOLS/ps4-pkg-config" Q= VQ=
 
