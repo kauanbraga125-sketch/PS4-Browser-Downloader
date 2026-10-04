@@ -189,6 +189,156 @@ p.write_text(s)
 p = Path("frontends/framebuffer/gui.c")
 s = p.read_text()
 s = s.replace("static const char *fename;", 'static const char *fename = "ps4";')
+
+# Hardware startup diagnostic.  This deliberately runs before NetSurf core
+# initialisation and uses only the same SDL window-surface API that is proven
+# by the old PS4 Browser Downloader.  Each checkpoint requires X to continue.
+if '#include <SDL2/SDL.h>' not in s:
+    s = s.replace(
+        '#include <stdbool.h>',
+        '#include <stdbool.h>\n#ifdef ORBIS\n#include <SDL2/SDL.h>\n#endif'
+    )
+
+diag = r'''
+#ifdef ORBIS
+static SDL_Window *ps4_diag_window;
+static SDL_Surface *ps4_diag_surface;
+static SDL_Joystick *ps4_diag_pad;
+
+static void ps4_diag_rect(int x, int y, int w, int h, Uint32 colour)
+{
+    SDL_Rect r = { x, y, w, h };
+    SDL_FillRect(ps4_diag_surface, &r, colour);
+}
+
+static void ps4_diag_digit(int digit)
+{
+    static const unsigned char seg[10] = {
+        0x3f, 0x06, 0x5b, 0x4f, 0x66,
+        0x6d, 0x7d, 0x07, 0x7f, 0x6f
+    };
+    const int cx = ps4_diag_surface->w / 2;
+    const int cy = ps4_diag_surface->h / 2;
+    const int t = 36;
+    const int len = 220;
+    const Uint32 fg = SDL_MapRGB(ps4_diag_surface->format, 255, 255, 255);
+    unsigned char m = (digit >= 0 && digit <= 9) ? seg[digit] : 0;
+
+    if (m & 0x01) ps4_diag_rect(cx-len/2, cy-len-t, len, t, fg);
+    if (m & 0x02) ps4_diag_rect(cx+len/2-t, cy-len, t, len, fg);
+    if (m & 0x04) ps4_diag_rect(cx+len/2-t, cy, t, len, fg);
+    if (m & 0x08) ps4_diag_rect(cx-len/2, cy+len, len, t, fg);
+    if (m & 0x10) ps4_diag_rect(cx-len/2, cy, t, len, fg);
+    if (m & 0x20) ps4_diag_rect(cx-len/2, cy-len, t, len, fg);
+    if (m & 0x40) ps4_diag_rect(cx-len/2, cy-t/2, len, t, fg);
+}
+
+static bool ps4_diag_checkpoint(int stage)
+{
+    static const Uint8 colours[][3] = {
+        { 20, 20, 20 }, { 30, 80, 170 }, { 20, 140, 90 },
+        { 180, 120, 20 }, { 130, 50, 160 }, { 160, 50, 50 }
+    };
+
+    if (ps4_diag_window == NULL) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0)
+            return false;
+
+        ps4_diag_window = SDL_CreateWindow(
+            "NetSurf PS4 startup diagnostic",
+            SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+            1920, 1080, 0);
+        if (ps4_diag_window == NULL)
+            return false;
+
+        ps4_diag_surface = SDL_GetWindowSurface(ps4_diag_window);
+        if (ps4_diag_surface == NULL)
+            return false;
+
+        if (SDL_NumJoysticks() > 0)
+            ps4_diag_pad = SDL_JoystickOpen(0);
+    }
+
+    {
+        const int ci = (stage >= 1 && stage <= 6) ? stage - 1 : 0;
+        Uint32 bg = SDL_MapRGB(ps4_diag_surface->format,
+                               colours[ci][0], colours[ci][1], colours[ci][2]);
+        SDL_FillRect(ps4_diag_surface, NULL, bg);
+    }
+
+    ps4_diag_digit(stage);
+    SDL_UpdateWindowSurface(ps4_diag_window);
+
+    for (;;) {
+        SDL_Event e;
+        if (SDL_WaitEventTimeout(&e, 100) == 0)
+            continue;
+
+        if (e.type == SDL_JOYBUTTONDOWN && e.jbutton.button == 0)
+            return true;
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_RETURN)
+            return true;
+
+        if ((e.type == SDL_JOYBUTTONDOWN && e.jbutton.button == 1) ||
+            (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE))
+            return false;
+    }
+}
+
+static void ps4_diag_close(void)
+{
+    if (ps4_diag_pad != NULL) {
+        SDL_JoystickClose(ps4_diag_pad);
+        ps4_diag_pad = NULL;
+    }
+    if (ps4_diag_window != NULL) {
+        SDL_DestroyWindow(ps4_diag_window);
+        ps4_diag_window = NULL;
+        ps4_diag_surface = NULL;
+    }
+    SDL_Quit();
+}
+#endif
+'''
+
+if 'ps4_diag_checkpoint(int stage)' not in s:
+    main_marker = '/**\n * Entry point from OS.'
+    s = s.replace(main_marker, diag + '\n' + main_marker)
+
+# Insert checkpoints at the exact startup boundaries we need to distinguish.
+s = s.replace(
+    'main(int argc, char** argv)\n{\n\tstruct browser_window *bw;',
+    'main(int argc, char** argv)\n{\n#ifdef ORBIS\n'
+    '\tif (!ps4_diag_checkpoint(1)) return 101;\n#endif\n'
+    '\tstruct browser_window *bw;'
+)
+
+s = s.replace(
+    '\trespaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);',
+    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(2)) return 102;\n#endif\n\n'
+    '\trespaths = fb_init_resource_path(NETSURF_FB_RESPATH":"NETSURF_FB_FONTPATH);'
+)
+
+s = s.replace(
+    '\t/* common initialisation */\n\tret = netsurf_init(NULL);',
+    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(3)) return 103;\n#endif\n\n'
+    '\t/* common initialisation */\n\tret = netsurf_init(NULL);'
+)
+
+s = s.replace(
+    '\t/* Override, since we have no support for non-core SELECT menu */',
+    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(4)) return 104;\n#endif\n\n'
+    '\t/* Override, since we have no support for non-core SELECT menu */'
+)
+
+s = s.replace(
+    '\tif (process_cmdline(argc,argv) != true)\n\t\tdie("unable to process command line.\\n");',
+    '\tif (process_cmdline(argc,argv) != true)\n\t\tdie("unable to process command line.\\n");\n\n'
+    '#ifdef ORBIS\n\tif (!ps4_diag_checkpoint(5)) return 105;\n'
+    '\tps4_diag_close();\n#endif'
+)
+
+p.write_text(s)
 old = """static void
 framebuffer_pick_default_fename(void *ctx, const char *name, enum nsfb_type_e type)
 {
