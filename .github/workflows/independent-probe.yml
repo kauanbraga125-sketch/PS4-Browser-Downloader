@@ -63,3 +63,14 @@ jobs:
           ld.lld /tmp/probe.o -o /tmp/probe.elf -m elf_x86_64 -pie --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr -L"$OO_PS4_TOOLCHAIN/lib" -lc -lkernel -lc++ -lSDL2 -lSceVideoOut -lSceAudioOut -lScePad -lSceNet -lSceSsl -lSceHttp "$OO_PS4_TOOLCHAIN/lib/crt1.o"
           test -s /tmp/probe.elf
           file /tmp/probe.elf || true
+
+
+      - name: Cross-compile libnsfb PS4 SDL2 surface
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-all-errors https://github.com/netsurf-browser/libnsfb/archive/b701cdce7241c3747ccd78658a365db0983ebe24.tar.gz -o /tmp/libnsfb.tar.gz
+          mkdir -p /tmp/libnsfb
+          tar xzf /tmp/libnsfb.tar.gz -C /tmp/libnsfb --strip-components=1
+          clang --target=x86_64-pc-freebsd12-elf -fPIC -c -DORBIS -D_GNU_SOURCE -isysroot "$OO_PS4_TOOLCHAIN" -isystem "$OO_PS4_TOOLCHAIN/include" -I/tmp/libnsfb/include -I/tmp/libnsfb/src ports/libnsfb/ps4_sdl2.c -o /tmp/ps4_sdl2.o
+          test -s /tmp/ps4_sdl2.o
+          file /tmp/ps4_sdl2.o || true
