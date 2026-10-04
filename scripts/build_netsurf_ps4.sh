@@ -106,6 +106,22 @@ build_zlib() {
     llvm-ar-18 rcs "$PREFIX/lib/libz.a" "${objects[@]}"
     cp zlib.h zconf.h "$PREFIX/include/"
     test -s "$PREFIX/lib/libz.a"
+
+    # libpng's pkg-config metadata declares zlib as a private dependency.
+    # Our minimal zlib build is manual, so provide the matching .pc file.
+    mkdir -p "$PREFIX/lib/pkgconfig"
+    cat > "$PREFIX/lib/pkgconfig/zlib.pc" <<EOF
+prefix=$PREFIX
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=\${prefix}/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.3.1
+Libs: -L\${libdir} -lz
+Cflags: -I\${includedir}
+EOF
 }
 
 build_libpng() {
