@@ -200,6 +200,33 @@ framebuffer_pick_default_fename(void *ctx, const char *name, enum nsfb_type_e ty
 \t\treturn;
 \tif (type < fetype) {"""
 s = s.replace(old, new)
+
+# DualShock Circle is translated to NSFB_KEY_ESCAPE by the PS4 SDL2 surface.
+# Give that key a browser-level meaning: history back.
+if "static void fb_update_back_forward(struct gui_window *gw);" not in s:
+    s = s.replace(
+        "struct gui_window *window_list = NULL;\n",
+        "struct gui_window *window_list = NULL;\n\n"
+        "static void fb_update_back_forward(struct gui_window *gw);\n"
+    )
+
+needle = """\tcase NSFB_EVENT_KEY_DOWN:
+\t\tswitch (cbi->event->value.keycode) {
+
+\t\tcase NSFB_KEY_DELETE:"""
+replacement = """\tcase NSFB_EVENT_KEY_DOWN:
+\t\tswitch (cbi->event->value.keycode) {
+
+\t\tcase NSFB_KEY_ESCAPE:
+\t\t\tif (browser_window_back_available(gw->bw))
+\t\t\t\tbrowser_window_history_back(gw->bw, false);
+\t\t\tfb_update_back_forward(gw);
+\t\t\tbreak;
+
+\t\tcase NSFB_KEY_DELETE:"""
+if "case NSFB_KEY_ESCAPE:" not in s[s.find("fb_browser_window_input"):s.find("fb_update_back_forward")]:
+    s = s.replace(needle, replacement)
+
 p.write_text(s)
 PY
 
