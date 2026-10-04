@@ -425,7 +425,7 @@ EOF
 export GCCSDK_INSTALL_ENV="$PREFIX"
 export GCCSDK_INSTALL_CROSSBIN="$TOOLS"
 
-NETSURF_LDFLAGS="$COMMON_LDFLAGS -Wl,--start-group -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel -Wl,--end-group"
+NETSURF_LDFLAGS="$COMMON_LDFLAGS -lc -lkernel -lSDL2 -lSceUserService -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lSceVideoOut -lSceAudioOut -lScePad"
 
 env CFLAGS="$COMMON_CFLAGS" LDFLAGS="$NETSURF_LDFLAGS" make -j2 TARGET=framebuffer "CC=$TOOLS/ps4-gcc" "CXX=$TOOLS/ps4-g++" "PKG_CONFIG=$TOOLS/ps4-pkg-config" Q= VQ=
 
