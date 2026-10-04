@@ -37,8 +37,12 @@ fetch_repo netsurf-browser/libhubbub 6651b8cf87a4aa87bcdb2ff024a02659cd3f9402 li
 fetch_repo netsurf-browser/libcss 499f1c4601ad39942fd1b2204053a387bec9b989 libcss
 fetch_repo netsurf-browser/libdom f69781e1f062444b5af3f62d431d7d94018da53b libdom
 fetch_repo netsurf-browser/libnsutils 0bd39060740b6163bd50875326654a722df97eb2 libnsutils
+fetch_repo netsurf-browser/libnsbmp ea063c9f46acb43e90208da14073332b505ef7e7 libnsbmp
+fetch_repo netsurf-browser/libnsgif 22e99eb6818b1284d0f3ff1b7f46159e87221220 libnsgif
 fetch_repo netsurf-browser/libnsfb b701cdce7241c3747ccd78658a365db0983ebe24 libnsfb
 fetch_repo madler/zlib refs/tags/v1.3.1 zlib
+fetch_repo pnggroup/libpng f5e92d76973a7a53f517579bc95d61483bf108c0 libpng
+fetch_repo libjpeg-turbo/libjpeg-turbo f29eda648547b36aa594c4116c7764a6c8a079b9 libjpeg-turbo
 fetch_repo netsurf-browser/nsgenbind 44c6736937ae17d4065d02959b82813b8f06a51e nsgenbind
 fetch_repo netsurf-browser/netsurf 39da3c3a40af4566d86500ff3052dfdc7f9a0378 netsurf
 
@@ -104,6 +108,48 @@ build_zlib() {
     test -s "$PREFIX/lib/libz.a"
 }
 
+build_libpng() {
+    echo
+    echo "================ libpng ================"
+    cd "$SRC/libpng"
+    ./configure \
+        --host="$HOST" \
+        --prefix="$PREFIX" \
+        --disable-shared \
+        --enable-static \
+        CC="$TOOLS/ps4-gcc" \
+        AR=llvm-ar-18 \
+        RANLIB=llvm-ranlib-18 \
+        CPPFLAGS="-I$PREFIX/include -I$ROOT/ports/compat" \
+        LDFLAGS="-L$PREFIX/lib"
+    make -j2
+    make install
+    test -s "$PREFIX/lib/libpng16.a"
+    test -f "$PREFIX/lib/pkgconfig/libpng.pc"
+}
+
+build_libjpeg() {
+    echo
+    echo "================ libjpeg-turbo ================"
+    cd "$SRC/libjpeg-turbo"
+    rm -rf build-ps4
+    cmake -S . -B build-ps4 \
+        -DCMAKE_SYSTEM_NAME=FreeBSD \
+        -DCMAKE_C_COMPILER="$TOOLS/ps4-gcc" \
+        -DCMAKE_AR=llvm-ar-18 \
+        -DCMAKE_RANLIB=llvm-ranlib-18 \
+        -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+        -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+        -DENABLE_SHARED=FALSE \
+        -DENABLE_STATIC=TRUE \
+        -DWITH_SIMD=FALSE \
+        -DWITH_TURBOJPEG=FALSE \
+        -DCMAKE_C_FLAGS="-I$ROOT/ports/compat"
+    cmake --build build-ps4 -j2
+    cmake --install build-ps4
+    test -s "$PREFIX/lib/libjpeg.a"
+}
+
 build_lib() {
     local name="$1"
     echo
@@ -143,6 +189,8 @@ test -x "$HOSTTOOLS/bin/nsgenbind"
 export PATH="$HOSTTOOLS/bin:$PATH"
 
 build_zlib
+build_libpng
+build_libjpeg
 
 build_lib libwapcaplet
 build_lib libparserutils
@@ -156,6 +204,8 @@ WITH_HUBBUB_BINDING := yes
 EOF
 build_lib libdom
 build_lib libnsutils
+build_lib libnsbmp
+build_lib libnsgif
 
 # Upstream libnsfb has an SDL 1.2 surface. Replace only that display surface
 # with the PS4 SDL2 implementation; keep the RAM surface for offscreen bitmaps.
@@ -392,7 +442,7 @@ s = s.replace(
     "\t/* Re-enable real site CSS and common raster images. */\n"
     "\tnsoption_set_bool(author_level_css, true);\n"
     "\tnsoption_set_bool(enable_javascript, false);\n"
-    "\tnsoption_set_int(script_timeout, 8);\n"
+    "\tnsoption_set_int(memory_cache_size, 32 * 1024 * 1024);\n"
     "\tnsoption_set_bool(foreground_images, true);\n"
     "\tnsoption_set_bool(background_images, true);\n"
     "\tnsoption_set_bool(animate_images, false);\n"
@@ -799,9 +849,12 @@ static bool ps4_open_form_keyboard(struct gui_window *gw)
         (void)browser_window_key_press(gw->bw, cp);
     }
 
-    /* Search/Go on the PS4 keyboard maps to Enter in the focused control. */
-    (void)browser_window_key_press(gw->bw, NS_KEY_CR);
-
+    /*
+     * Do not auto-submit here. Real-hardware testing showed that submitting
+     * from inside the IME left some result-page form controls in a stale
+     * focus/caret state. Return the accepted text to the page, then let the
+     * user press X on the page's Search button just like a normal browser.
+     */
     return true;
 }
 #endif
@@ -1391,12 +1444,12 @@ PY
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
-override NETSURF_USE_DUKTAPE := YES
-override NETSURF_USE_BMP := NO
-override NETSURF_USE_GIF := NO
-override NETSURF_USE_JPEG := NO
+override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_BMP := YES
+override NETSURF_USE_GIF := YES
+override NETSURF_USE_JPEG := YES
 override NETSURF_USE_JPEGXL := NO
-override NETSURF_USE_PNG := NO
+override NETSURF_USE_PNG := YES
 override NETSURF_USE_VIDEO := NO
 override NETSURF_USE_WEBP := NO
 override NETSURF_USE_NSSVG := NO
