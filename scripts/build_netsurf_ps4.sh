@@ -399,6 +399,42 @@ if "case NSFB_KEY_ESCAPE:" not in s[s.find("fb_browser_window_input"):s.find("fb
 p.write_text(s)
 PY
 
+cat > frontends/framebuffer/res/welcome.html <<'EOF'
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>NetSurf PS4 - Teste de Rede</title>
+<style>
+html,body { margin:0; padding:0; background:#101820; color:#fff; font-family:sans-serif; }
+main { width:88%; margin:40px auto; }
+h1 { font-size:52px; margin:0 0 20px; }
+p { font-size:30px; line-height:1.4; }
+a {
+  display:block;
+  margin:30px 0;
+  padding:38px;
+  background:#f2f2f2;
+  color:#111;
+  text-decoration:none;
+  font-size:40px;
+  border:4px solid #777;
+}
+small { font-size:24px; }
+</style>
+</head>
+<body>
+<main>
+<h1>NetSurf PS4</h1>
+<p>O motor abriu. Agora teste a rede sem precisar digitar.</p>
+<a href="http://example.com/">TESTAR HTTP</a>
+<a href="https://example.com/">TESTAR HTTPS</a>
+<p><small>Use o analogico para mover a seta e X para clicar.</small></p>
+</main>
+</body>
+</html>
+EOF
+
 cat > Makefile.config <<'EOF'
 override NETSURF_USE_CURL := NO
 override NETSURF_USE_OPENSSL := NO
@@ -417,7 +453,7 @@ override NETSURF_USE_UTF8PROC := NO
 override NETSURF_USE_HARU_PDF := NO
 override NETSURF_FS_BACKING_STORE := NO
 override NETSURF_FB_FONTLIB := internal
-override NETSURF_HOMEPAGE := "https://example.com/"
+override NETSURF_HOMEPAGE := "about:welcome"
 NETSURF_FB_RESPATH := /app0/assets/misc
 NETSURF_FB_FONTPATH := /app0/res
 EOF
