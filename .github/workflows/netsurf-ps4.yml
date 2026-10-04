@@ -91,6 +91,24 @@ jobs:
           path: build/independent/
           if-no-files-found: error
 
+      - name: Report build-stage failure
+        if: ${{ failure() && steps.build.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=failure -f context="netsurf-v3.0-fail-build"
+
+      - name: Report package-stage failure
+        if: ${{ failure() && steps.package.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=failure -f context="netsurf-v3.0-fail-package"
+
+      - name: Report publish-stage failure
+        if: ${{ failure() && steps.publish.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/$GITHUB_REPOSITORY/statuses/$GITHUB_SHA" -f state=failure -f context="netsurf-v3.0-fail-publish"
+
       - name: Report v3.0 build status
         if: ${{ success() || failure() }}
         env:
