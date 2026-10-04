@@ -2603,7 +2603,7 @@ static int open_native_pad() {
 }
 
 static int run_sdl_compat(const std::string& backend) {
-    notify_user("Hybrid: GPU indisponivel. Entrando no modo SDL compativel.");
+    notify_user("Hybrid v7.8.2: modo SDL seguro ativo.");
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         notify_user(std::string("Hybrid SDL: init falhou - ") + SDL_GetError());
@@ -2611,7 +2611,7 @@ static int run_sdl_compat(const std::string& backend) {
     }
 
     SDL_Window* window = SDL_CreateWindow(
-        "PS4 Hybrid Browser v7.8.1 SDL fallback",
+        "PS4 Hybrid Browser v7.8.2 SDL Safe",
         SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
         SCREEN_W, SCREEN_H, 0);
     if (!window) {
@@ -2674,7 +2674,7 @@ static int run_sdl_compat(const std::string& backend) {
     uint64_t seenGeneration = 0;
     bool fullRedraw = true;
 
-    notify_user("Hybrid SDL fallback: navegador ativo. O log /data/PBDL/navigation.log tem o erro EGL.");
+    notify_user("Hybrid v7.8.2 SDL: navegador ativo | X clicar | O voltar | R2 URL | L2 Google | Options sair");
 
     for (;;) {
         const uint64_t loopStartUs = sceKernelGetProcessTime();
@@ -2795,7 +2795,7 @@ int main() {
     sceUserServiceInitialize(nullptr);
     mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.8.1 EGL compat");
+    append_diag("BOOT", "PS4 Hybrid Browser v7.8.2 SDL safe - EGL bypass");
 
     const bool daemonReady = start_download_daemon();
     if (!daemonReady) {
@@ -2811,192 +2811,21 @@ int main() {
     }
     while (!backend.empty() && backend.back() == '/') backend.pop_back();
 
-    GpuRenderer gpu;
-    if (!gpu_init(gpu)) {
-        const std::string why = gpu.error.empty() ? "desconhecido" : gpu.error;
-        notify_user("Hybrid GPU falhou: " + why + ". Usando SDL.");
-        append_diag("GPU_FALLBACK", why);
-        gpu_shutdown(gpu);
-        (void)run_sdl_compat(backend);
-        clean_exit_to_shell();
-    }
+    // v7.8.2 hardware hotfix:
+    // Firmware/hardware test showed eglCreateContext can fail even after
+    // eglInitialize/eglChooseConfig succeed. Do not let Piglet/EGL block
+    // the browser. SDL is initialized directly and keeps the Chromium
+    // backend, controller input and BGFT download path unchanged.
+    append_diag("RENDERER", "SDL_SAFE forced; Piglet/EGL startup bypassed");
+    notify_user("Hybrid v7.8.2: iniciando renderer SDL seguro.");
 
-    FrameWorker frameWorker;
-    if (!start_frame_worker(frameWorker, backend)) {
-        notify_user("Hybrid: falha iniciando stream de video.");
-        gpu_shutdown(gpu);
+    const int sdlResult = run_sdl_compat(backend);
+    if (sdlResult != 0) {
+        append_diag("SDL_FATAL", "run_sdl_compat falhou");
+        notify_user("Hybrid v7.8.2: renderer SDL falhou. Veja /data/PBDL/navigation.log");
         sleep(4);
-        clean_exit_to_shell();
     }
 
-    DownloadWorker downloadWorker;
-    const bool downloadWorkerStarted =
-        start_download_worker(downloadWorker, backend);
-
-    const int pad = open_native_pad();
-    if (pad < 0) {
-        frameWorker.stop = true;
-        stop_frame_worker(frameWorker);
-        if (downloadWorkerStarted) stop_download_worker(downloadWorker);
-        gpu_shutdown(gpu);
-        notify_user("Hybrid: controle PS4 nao abriu.");
-        sleep(4);
-        clean_exit_to_shell();
-    }
-
-    notify_user("Hybrid v7.8.1 GPU: X clicar | O voltar | R2 URL | L2 Google | Options sair");
-
-    float cursorX = SCREEN_W * 0.5f;
-    float cursorY = SCREEN_H * 0.5f;
-    uint32_t oldButtons = 0;
-    uint64_t seenGeneration = 0;
-    uint64_t lastUs = sceKernelGetProcessTime();
-
-    stbi_uc* pendingPixels = nullptr;
-    int pendingW = 0;
-    int pendingH = 0;
-
-    ControlWorker controlWorker;
-    const bool controlWorkerStarted =
-        start_control_worker(controlWorker, backend);
-
-    for (;;) {
-        const uint64_t loopStartUs = sceKernelGetProcessTime();
-        const uint64_t nowUs = loopStartUs;
-        float dt = static_cast<float>(nowUs - lastUs) / 1000000.0f;
-        lastUs = nowUs;
-        if (dt < 0.0f) dt = 0.0f;
-        if (dt > 0.025f) dt = 0.025f;
-
-        if (take_latest_frame(frameWorker, seenGeneration,
-                              pendingPixels, pendingW, pendingH)) {
-            gpu_upload_frame(gpu, pendingPixels, pendingW, pendingH);
-            stbi_image_free(pendingPixels);
-            pendingPixels = nullptr;
-        }
-
-        OrbisPadData pd{};
-        if (scePadReadState(pad, &pd) >= 0) {
-            const uint32_t pressed = pd.buttons & ~oldButtons;
-            oldButtons = pd.buttons;
-
-            const float vx = cursor_axis_velocity(pd.leftStick.x);
-            const float vy = cursor_axis_velocity(pd.leftStick.y);
-            cursorX += vx * dt;
-            cursorY += vy * dt;
-            if (cursorX < 0.0f) cursorX = 0.0f;
-            if (cursorY < 0.0f) cursorY = 0.0f;
-            if (cursorX > SCREEN_W - 1) cursorX = SCREEN_W - 1;
-            if (cursorY > SCREEN_H - 1) cursorY = SCREEN_H - 1;
-
-            const int cx = static_cast<int>(cursorX + 0.5f);
-            const int cy = static_cast<int>(cursorY + 0.5f);
-            const int bx = cx * 1280 / SCREEN_W;
-            const int by = cy * 720 / SCREEN_H;
-
-            if (pressed & ORBIS_PAD_BUTTON_CROSS) {
-                if (backend_api(backend, "/api/click",
-                    "{\"x\":" + std::to_string(bx) +
-                    ",\"y\":" + std::to_string(by) + "}")) {
-                    if (backend_focus_is_editable(backend)) {
-                        std::string text;
-                        if (open_url_ime(text)) {
-                            backend_api(backend, "/api/type-submit",
-                                "{\"text\":\"" + json_escape(text) + "\"}");
-                        }
-                    }
-                }
-            }
-
-            if ((pressed & ORBIS_PAD_BUTTON_CIRCLE) ||
-                (pressed & ORBIS_PAD_BUTTON_L1)) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/back");
-                else
-                    backend_api(backend, "/api/back");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_R1) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/forward");
-                else
-                    backend_api(backend, "/api/forward");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_SQUARE) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/reload");
-                else
-                    backend_api(backend, "/api/reload");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_UP) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/scroll", "{\"y\":-500}");
-                else
-                    backend_api(backend, "/api/scroll", "{\"y\":-500}");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_DOWN) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/scroll", "{\"y\":500}");
-                else
-                    backend_api(backend, "/api/scroll", "{\"y\":500}");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_TRIANGLE) {
-                backend_api(backend, "/api/image-at",
-                    "{\"x\":" + std::to_string(bx) +
-                    ",\"y\":" + std::to_string(by) + "}");
-                notify_user("Hybrid: procurando imagem sob o cursor...");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_R2) {
-                std::string text;
-                if (open_url_ime(text)) {
-                    backend_api(backend, "/api/nav",
-                        "{\"url\":\"" + json_escape(text) + "\"}");
-                }
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_R3) {
-                std::string text;
-                if (open_url_ime(text)) {
-                    backend_api(backend, "/api/type",
-                        "{\"text\":\"" + json_escape(text) + "\"}");
-                }
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_L2) {
-                if (controlWorkerStarted)
-                    queue_control(controlWorker, "/api/home");
-                else
-                    backend_api(backend, "/api/home");
-                notify_user("Hybrid: Google/Home.");
-            }
-
-            if (pressed & ORBIS_PAD_BUTTON_OPTIONS)
-                break;
-
-            gpu_render(gpu, cx, cy);
-        } else {
-            gpu_render(gpu,
-                static_cast<int>(cursorX),
-                static_cast<int>(cursorY));
-        }
-
-        // Maintain ~60 Hz only when eglSwapBuffers returned faster than vblank.
-        const uint64_t elapsedUs = sceKernelGetProcessTime() - loopStartUs;
-        const uint64_t targetUs = 16667;
-        if (elapsedUs < targetUs)
-            usleep(static_cast<useconds_t>(targetUs - elapsedUs));
-    }
-
-    if (controlWorkerStarted) stop_control_worker(controlWorker);
-    if (downloadWorkerStarted) stop_download_worker(downloadWorker);
-    stop_frame_worker(frameWorker);
-    scePadClose(pad);
-    gpu_shutdown(gpu);
     clean_exit_to_shell();
     return 0;
 }
