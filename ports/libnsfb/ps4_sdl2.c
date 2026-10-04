@@ -1,13 +1,11 @@
 /*
  * PS4 SDL2 surface for libnsfb.
  *
- * This is intentionally a small first-port surface:
- * - 32-bit XRGB framebuffer only
- * - SDL2 window/renderer/streaming texture
- * - DualShock-style joystick mapping: X = click, O = browser-back key
- * - left stick moves a software pointer
+ * Uses the SDL window-surface path that is already proven by the working
+ * PS4 Browser Downloader on hardware: SDL_GetWindowSurface() followed by
+ * direct software drawing and SDL_UpdateWindowSurface().
  *
- * It does NOT call any Sony WebBrowser/WebView API.
+ * It does NOT call Sony's WebBrowser/WebView APIs.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -31,11 +29,8 @@
 
 struct ps4_sdl2_surface {
     SDL_Window *window;
-    SDL_Renderer *renderer;
-    SDL_Texture *texture;
+    SDL_Surface *surface;
     SDL_Joystick *pad;
-    uint8_t *pixels;
-    size_t pixels_size;
     int pointer_x;
     int pointer_y;
 };
@@ -72,14 +67,13 @@ static enum nsfb_key_code_e map_key(SDL_Keycode key)
 
 static void present(nsfb_t *nsfb)
 {
-    struct ps4_sdl2_surface *s = (struct ps4_sdl2_surface *)nsfb->surface_priv;
-    if (s == NULL || s->texture == NULL || s->renderer == NULL)
+    struct ps4_sdl2_surface *s =
+        (struct ps4_sdl2_surface *)nsfb->surface_priv;
+
+    if (s == NULL || s->window == NULL || s->surface == NULL)
         return;
 
-    SDL_UpdateTexture(s->texture, NULL, s->pixels, nsfb->linelen);
-    SDL_RenderClear(s->renderer);
-    SDL_RenderCopy(s->renderer, s->texture, NULL, NULL);
-    SDL_RenderPresent(s->renderer);
+    SDL_UpdateWindowSurface(s->window);
 }
 
 static bool ps4_copy(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox)
@@ -110,46 +104,40 @@ static bool ps4_copy(nsfb_t *nsfb, nsfb_bbox_t *srcbox, nsfb_bbox_t *dstbox)
     return true;
 }
 
-static int rebuild_pixels(nsfb_t *nsfb, struct ps4_sdl2_surface *s)
+static int bind_window_surface(nsfb_t *nsfb, struct ps4_sdl2_surface *s)
 {
-    const size_t needed = (size_t)nsfb->width * (size_t)nsfb->height * 4;
-    uint8_t *p = (uint8_t *)realloc(s->pixels, needed);
-    if (p == NULL)
+    s->surface = SDL_GetWindowSurface(s->window);
+    if (s->surface == NULL)
         return -1;
 
-    s->pixels = p;
-    s->pixels_size = needed;
-    memset(s->pixels, 0xff, needed);
-
-    if (s->texture != NULL) {
-        SDL_DestroyTexture(s->texture);
-        s->texture = NULL;
-    }
-
-    s->texture = SDL_CreateTexture(s->renderer,
-                                   SDL_PIXELFORMAT_ARGB8888,
-                                   SDL_TEXTUREACCESS_STREAMING,
-                                   nsfb->width,
-                                   nsfb->height);
-    if (s->texture == NULL)
+    if (s->surface->format == NULL || s->surface->format->BytesPerPixel != 4)
         return -1;
 
-    nsfb->ptr = s->pixels;
-    nsfb->linelen = nsfb->width * 4;
+    nsfb->width = s->surface->w;
+    nsfb->height = s->surface->h;
     nsfb->bpp = 32;
+    nsfb->format = NSFB_FMT_XRGB8888;
+    nsfb->ptr = s->surface->pixels;
+    nsfb->linelen = s->surface->pitch;
+
+    select_plotters(nsfb);
+    nsfb->plotter_fns->copy = ps4_copy;
+
     return 0;
 }
 
 static int ps4_geometry(nsfb_t *nsfb, int width, int height,
                         enum nsfb_format_e format)
 {
-    if (format != NSFB_FMT_XRGB8888 && format != NSFB_FMT_XBGR8888)
-        format = NSFB_FMT_XRGB8888;
+    (void)format;
+
+    if (width <= 0) width = 1920;
+    if (height <= 0) height = 1080;
 
     nsfb->width = width;
     nsfb->height = height;
-    nsfb->format = format;
     nsfb->bpp = 32;
+    nsfb->format = NSFB_FMT_XRGB8888;
 
     select_plotters(nsfb);
     nsfb->plotter_fns->copy = ps4_copy;
@@ -157,8 +145,12 @@ static int ps4_geometry(nsfb_t *nsfb, int width, int height,
     if (nsfb->surface_priv != NULL) {
         struct ps4_sdl2_surface *s =
             (struct ps4_sdl2_surface *)nsfb->surface_priv;
-        if (rebuild_pixels(nsfb, s) != 0)
-            return -1;
+        if (s->surface != NULL) {
+            nsfb->width = s->surface->w;
+            nsfb->height = s->surface->h;
+            nsfb->ptr = s->surface->pixels;
+            nsfb->linelen = s->surface->pitch;
+        }
     }
 
     return 0;
@@ -174,15 +166,15 @@ static int ps4_initialise(nsfb_t *nsfb)
 
     struct ps4_sdl2_surface *s =
         (struct ps4_sdl2_surface *)calloc(1, sizeof(*s));
-    if (s == NULL)
+    if (s == NULL) {
+        SDL_Quit();
         return -1;
+    }
 
     nsfb->surface_priv = s;
-    nsfb->bpp = 32;
-    nsfb->format = NSFB_FMT_XRGB8888;
 
-    select_plotters(nsfb);
-    nsfb->plotter_fns->copy = ps4_copy;
+    if (nsfb->width <= 0) nsfb->width = 1920;
+    if (nsfb->height <= 0) nsfb->height = 1080;
 
     s->window = SDL_CreateWindow("NetSurf PS4",
                                  SDL_WINDOWPOS_UNDEFINED,
@@ -193,12 +185,10 @@ static int ps4_initialise(nsfb_t *nsfb)
     if (s->window == NULL)
         goto fail;
 
-    s->renderer = SDL_CreateRenderer(s->window, -1, SDL_RENDERER_SOFTWARE);
-    if (s->renderer == NULL)
+    if (bind_window_surface(nsfb, s) != 0)
         goto fail;
 
-    if (rebuild_pixels(nsfb, s) != 0)
-        goto fail;
+    memset(nsfb->ptr, 0xff, (size_t)nsfb->linelen * (size_t)nsfb->height);
 
     s->pointer_x = nsfb->width / 2;
     s->pointer_y = nsfb->height / 2;
@@ -212,12 +202,10 @@ static int ps4_initialise(nsfb_t *nsfb)
 
 fail:
     if (s->pad) SDL_JoystickClose(s->pad);
-    if (s->texture) SDL_DestroyTexture(s->texture);
-    if (s->renderer) SDL_DestroyRenderer(s->renderer);
     if (s->window) SDL_DestroyWindow(s->window);
-    free(s->pixels);
     free(s);
     nsfb->surface_priv = NULL;
+    nsfb->ptr = NULL;
     SDL_Quit();
     return -1;
 }
@@ -229,10 +217,7 @@ static int ps4_finalise(nsfb_t *nsfb)
 
     if (s != NULL) {
         if (s->pad) SDL_JoystickClose(s->pad);
-        if (s->texture) SDL_DestroyTexture(s->texture);
-        if (s->renderer) SDL_DestroyRenderer(s->renderer);
         if (s->window) SDL_DestroyWindow(s->window);
-        free(s->pixels);
         free(s);
     }
 
@@ -314,6 +299,7 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
         const int deadzone = 9000;
         int dx = 0;
         int dy = 0;
+
         if (in.jaxis.axis == 0 && abs(in.jaxis.value) > deadzone)
             dx = in.jaxis.value / 5000;
         if (in.jaxis.axis == 1 && abs(in.jaxis.value) > deadzone)
@@ -323,6 +309,7 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 
         s->pointer_x += dx;
         s->pointer_y += dy;
+
         if (s->pointer_x < 0) s->pointer_x = 0;
         if (s->pointer_y < 0) s->pointer_y = 0;
         if (s->pointer_x >= nsfb->width) s->pointer_x = nsfb->width - 1;
@@ -339,16 +326,17 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     case SDL_JOYBUTTONUP:
         event->type = (in.type == SDL_JOYBUTTONDOWN) ?
             NSFB_EVENT_KEY_DOWN : NSFB_EVENT_KEY_UP;
+
         if (in.jbutton.button == 0) {
-            /* Cross / X = activate focused/cursor target */
             event->value.keycode = NSFB_KEY_MOUSE_1;
             return true;
         }
+
         if (in.jbutton.button == 1) {
-            /* Circle / O = patched by NetSurf PS4 frontend as history back */
             event->value.keycode = NSFB_KEY_ESCAPE;
             return true;
         }
+
         return false;
 
     default:
