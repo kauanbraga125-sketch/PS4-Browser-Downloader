@@ -44,8 +44,24 @@ SFO="$PKGROOT/sce_sys/param.sfo"
 "$TOOLBIN/PkgTool.Core" sfo_setentry "$SFO" VERSION --type Utf8 --maxsize 8 --value "$VERSION"
 
 # NetSurf was compiled with NETSURF_FB_RESPATH=/app0/res.
-# Copy the actual dereferenced files from the cross-build artifact.
-cp -a "$ROOT/build/independent/res/." "$PKGROOT/res/"
+# Do NOT package the whole source resource tree. Icons, throbber images,
+# pointers and the internal font were converted into C objects at build time.
+# Upstream's framebuffer install target only installs these runtime resources.
+runtime_resources=(
+  Messages
+  adblock.css
+  credits.html
+  default.css
+  internal.css
+  licence.html
+  netsurf.png
+  quirks.css
+  welcome.html
+)
+for resource in "${runtime_resources[@]}"; do
+  test -f "$ROOT/build/independent/res/$resource"
+  cp "$ROOT/build/independent/res/$resource" "$PKGROOT/res/$resource"
+done
 
 cd "$PKGROOT"
 mapfile -t files < <(find . -type f -printf '%P\n' | LC_ALL=C sort)
@@ -58,6 +74,9 @@ done
 
 echo "==> create GP4 with ${#files[@]} files"
 "$TOOLBIN/create-gp4"   -out "$PKGROOT/pkg.gp4"   --content-id="$CONTENT_ID"   --files "$file_list"
+
+echo "==> generated GP4"
+cat "$PKGROOT/pkg.gp4"
 
 echo "==> build PKG"
 "$TOOLBIN/PkgTool.Core" pkg_build "$PKGROOT/pkg.gp4" "$OUTDIR"
