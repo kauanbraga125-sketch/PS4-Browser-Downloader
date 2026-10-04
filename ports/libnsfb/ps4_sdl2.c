@@ -234,17 +234,36 @@ static bool ps4_emit_stick_motion(nsfb_t *nsfb,
     if (s == NULL || s->pad == NULL)
         return false;
 
+    static Uint32 last_move_ms;
+    const Uint32 now = SDL_GetTicks();
+
+    /* Cap pointer updates to roughly 60 Hz. */
+    if ((Uint32)(now - last_move_ms) < 16)
+        return false;
+
     SDL_JoystickUpdate();
     const int ax = SDL_JoystickGetAxis(s->pad, 0);
     const int ay = SDL_JoystickGetAxis(s->pad, 1);
-    const int deadzone = 5500;
+    const int deadzone = 7000;
 
-    int dx = (abs(ax) > deadzone) ? ax / 1500 : 0;
-    int dy = (abs(ay) > deadzone) ? ay / 1500 : 0;
+    int dx = 0;
+    int dy = 0;
+
+    if (abs(ax) > deadzone) {
+        int speed = 1 + (abs(ax) - deadzone) / 5000;
+        if (speed > 6) speed = 6;
+        dx = (ax < 0) ? -speed : speed;
+    }
+    if (abs(ay) > deadzone) {
+        int speed = 1 + (abs(ay) - deadzone) / 5000;
+        if (speed > 6) speed = 6;
+        dy = (ay < 0) ? -speed : speed;
+    }
 
     if (dx == 0 && dy == 0)
         return false;
 
+    last_move_ms = now;
     s->pointer_x += dx;
     s->pointer_y += dy;
 
