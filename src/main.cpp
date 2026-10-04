@@ -2793,39 +2793,22 @@ static int run_sdl_compat(const std::string& backend) {
 int main() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     sceUserServiceInitialize(nullptr);
-    mkdir("/data/Downloads", 0777);
     mkdir("/data/PBDL", 0777);
-    append_diag("BOOT", "PS4 Hybrid Browser v7.8.2 SDL safe - EGL bypass");
 
-    const bool daemonReady = start_download_daemon();
-    if (!daemonReady) {
-        append_diag("DAEMON_WARN", g_status);
-        notify_user("Hybrid: daemon indisponivel. Navegacao continua.");
-    }
+    static const char* kSuperPsxPs4Url =
+        "https://www.superpsx.com/category/ps4/ps4-games-free/";
 
-    std::string backend = discover_hybrid_backend();
-    if (backend.empty()) {
-        notify_user("Hybrid: backend Chromium nao encontrado.");
+    append_diag("BOOT", "SuperPSX Client v1");
+    notify_user("SuperPSX Client v1: abrindo catalogo PS4...");
+
+    if (!open_browser_and_wait(kSuperPsxPs4Url)) {
+        append_diag("SUPERPSX_OPEN_FAIL", g_status);
+        notify_user("SuperPSX Client: falha ao abrir a pagina - " + g_status);
         sleep(4);
         clean_exit_to_shell();
     }
-    while (!backend.empty() && backend.back() == '/') backend.pop_back();
 
-    // v7.8.2 hardware hotfix:
-    // Firmware/hardware test showed eglCreateContext can fail even after
-    // eglInitialize/eglChooseConfig succeed. Do not let Piglet/EGL block
-    // the browser. SDL is initialized directly and keeps the Chromium
-    // backend, controller input and BGFT download path unchanged.
-    append_diag("RENDERER", "SDL_SAFE forced; Piglet/EGL startup bypassed");
-    notify_user("Hybrid v7.8.2: iniciando renderer SDL seguro.");
-
-    const int sdlResult = run_sdl_compat(backend);
-    if (sdlResult != 0) {
-        append_diag("SDL_FATAL", "run_sdl_compat falhou");
-        notify_user("Hybrid v7.8.2: renderer SDL falhou. Veja /data/PBDL/navigation.log");
-        sleep(4);
-    }
-
+    append_diag("EXIT", "SuperPSX Client fechado normalmente");
     clean_exit_to_shell();
     return 0;
 }
