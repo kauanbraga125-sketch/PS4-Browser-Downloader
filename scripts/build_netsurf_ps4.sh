@@ -113,7 +113,7 @@ build_libpng() {
     echo "================ libpng ================"
     cd "$SRC/libpng"
     ./configure \
-        --host="$HOST" \
+        --host="x86_64-unknown-freebsd" \
         --prefix="$PREFIX" \
         --disable-shared \
         --enable-static \
