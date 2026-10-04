@@ -8,6 +8,7 @@ on:
 permissions:
   contents: write
   statuses: write
+  issues: write
 
 jobs:
   build:
@@ -38,8 +39,9 @@ jobs:
       - name: Build NetSurf for PS4
         id: build
         run: |
+          set -o pipefail
           chmod +x scripts/build_netsurf_ps4.sh
-          scripts/build_netsurf_ps4.sh
+          scripts/build_netsurf_ps4.sh 2>&1 | tee build-v3.log
 
       - name: Package independent PS4 PKG
         id: package
@@ -90,6 +92,20 @@ jobs:
           name: netsurf-ps4-cross-build
           path: build/independent/
           if-no-files-found: error
+
+      - name: Publish build failure diagnostic
+        if: ${{ failure() && steps.build.outcome == 'failure' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "Automated temporary diagnostic for commit $GITHUB_SHA"
+            echo
+            echo '~~~'
+            tail -n 180 build-v3.log
+            echo '~~~'
+          } > build-failure.md
+          gh issue create --title "TEMP v3.0 build diagnostic $GITHUB_SHA" --body-file build-failure.md
 
       - name: Report build-stage failure
         if: ${{ failure() && steps.build.outcome == 'failure' }}
