@@ -161,7 +161,7 @@ static int ps4_initialise(nsfb_t *nsfb)
     if (nsfb->surface_priv != NULL)
         return -1;
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_JOYSTICK) != 0)
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0)
         return -1;
 
     struct ps4_sdl2_surface *s =
@@ -227,33 +227,24 @@ static int ps4_finalise(nsfb_t *nsfb)
     return 0;
 }
 
-static uint32_t wake_timer(uint32_t interval, void *opaque)
-{
-    (void)interval;
-    (void)opaque;
-    SDL_Event ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = SDL_USEREVENT;
-    SDL_PushEvent(&ev);
-    return 0;
-}
-
 static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
 {
     struct ps4_sdl2_surface *s =
         (struct ps4_sdl2_surface *)nsfb->surface_priv;
     SDL_Event in;
     int got = 0;
-    SDL_TimerID timer = 0;
 
     if (timeout == 0) {
         got = SDL_PollEvent(&in);
+    } else if (timeout > 0) {
+        got = SDL_WaitEventTimeout(&in, timeout);
+        if (!got) {
+            event->type = NSFB_EVENT_CONTROL;
+            event->value.controlcode = NSFB_CONTROL_TIMEOUT;
+            return true;
+        }
     } else {
-        if (timeout > 0)
-            timer = SDL_AddTimer((uint32_t)timeout, wake_timer, NULL);
         got = SDL_WaitEvent(&in);
-        if (timer != 0 && (!got || in.type != SDL_USEREVENT))
-            SDL_RemoveTimer(timer);
     }
 
     if (!got)
@@ -265,11 +256,6 @@ static bool ps4_input(nsfb_t *nsfb, nsfb_event_t *event, int timeout)
     case SDL_QUIT:
         event->type = NSFB_EVENT_CONTROL;
         event->value.controlcode = NSFB_CONTROL_QUIT;
-        return true;
-
-    case SDL_USEREVENT:
-        event->type = NSFB_EVENT_CONTROL;
-        event->value.controlcode = NSFB_CONTROL_TIMEOUT;
         return true;
 
     case SDL_KEYDOWN:
