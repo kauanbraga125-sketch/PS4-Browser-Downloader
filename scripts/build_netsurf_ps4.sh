@@ -135,6 +135,8 @@ build_libjpeg() {
     rm -rf build-ps4
     cmake -S . -B build-ps4 \
         -DCMAKE_SYSTEM_NAME=FreeBSD \
+        -DCMAKE_SYSTEM_PROCESSOR=x86_64 \
+        -DCMAKE_SIZEOF_VOID_P=8 \
         -DCMAKE_C_COMPILER="$TOOLS/ps4-gcc" \
         -DCMAKE_AR=llvm-ar-18 \
         -DCMAKE_RANLIB=llvm-ranlib-18 \
