@@ -64,7 +64,23 @@ jobs:
           ld.lld build/loader-control/control.o -o build/loader-control/control.elf -m elf_x86_64 -pie             --script "$OO_PS4_TOOLCHAIN/link.x" --eh-frame-hdr             -L"$OO_PS4_TOOLCHAIN/lib"             -lSDL2 -lSceUserService -lSceVideoOut -lSceAudioOut -lScePad             -lSceSysmodule -lSceNet -lSceSsl -lSceHttp -lc -lkernel             "$OO_PS4_TOOLCHAIN/lib/crt1.o"
 
       - name: Package loader control
-        run: bash scripts/package_loader_control.sh
+        run: |
+          set -euxo pipefail
+          chmod +x scripts/package_loader_control.sh
+          chmod -R a+rwX "$GITHUB_WORKSPACE"
+          docker run --rm --user 0:0 \
+            --env OO_PS4_TOOLCHAIN=/opt/openorbis \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$OO_PS4_TOOLCHAIN:/opt/openorbis" \
+            --workdir /work ubuntu:20.04 bash -lc '
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y --no-install-recommends libicu66 libssl1.1 ca-certificates python3 findutils
+              chmod +x /opt/openorbis/bin/linux/* || true
+              scripts/package_loader_control.sh
+            '
+          test -s PS4_Loader_Control_v1.0.pkg
+          sha256sum -c PS4_Loader_Control_v1.0.pkg.sha256
 
       - uses: actions/upload-artifact@v4
         with:
