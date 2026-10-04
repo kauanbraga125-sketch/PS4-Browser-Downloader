@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -67,6 +67,18 @@ jobs:
           path: |
             PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg
             PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg.sha256
+
+      - name: Publish v3.0 test package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          TAG="netsurf-v3.0-test"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG"               PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg               PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg.sha256               --clobber
+          else
+            gh release create "$TAG"               PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg               PS4_Browser_NetSurf_v3.0_Stable_Visual.pkg.sha256               --target "$GITHUB_SHA"               --prerelease               --title "PS4 Browser NetSurf v3.0 Stable Visual"               --notes "Independent NetSurf/OpenOrbis PS4 test build. JavaScript is disabled for stability; PNG/JPEG/GIF/BMP rendering and form POST support are enabled."
+          fi
 
       - name: Upload cross-build
         uses: actions/upload-artifact@v4
