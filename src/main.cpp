@@ -62,7 +62,7 @@ void render(){
  int y=310; int first=std::max(0,selected-6);
  for(int i=first;i<(int)jobs.size()&&i<first+7;i++,y+=82){bool sel=i==selected;box(64,y,1792,66,sel?SDL_Color{30,75,118}:SDL_Color{22,32,48});text(jobs[i]->name.substr(0,35),92,y+22,3,{245,245,250});
   const char*st=jobs[i]->complete.load()?"DONE":jobs[i]->running.load()?"ACTIVE":jobs[i]->failed.load()?"ERROR":"READY";text(st,1300,y+24,2,{150,205,225});
-  if(jobs[i]->session){bt::ProgressInfo p{};{std::lock_guard<std::mutex>g(jobs[i]->lock);p=jobs[i]->progress;}text(std::to_string((int)p.pct)+"%",1435,y+24,2,{190,215,235});box(1510,y+26,270,12,{55,65,80});box(1510,y+26,(int)(270*std::max(0.f,std::min(100.f,p.pct))/100.f),12,{40,190,125});}
+  if(jobs[i]->session){bt::ProgressInfo p{};{std::lock_guard<std::mutex>g(jobs[i]->lock);p=jobs[i]->progress;}text(std::to_string((int)p.pct)+"%",1435,y+24,2,{190,215,235});char rate[32];std::snprintf(rate,sizeof(rate),"%.1f MB/S",p.speed_bps/(1024.0*1024.0));text("PEERS "+std::to_string(p.peers_active),1300,y+46,1,{145,170,195});text(rate,1510,y+44,1,{145,190,175});box(1510,y+26,270,10,{55,65,80});box(1510,y+26,(int)(270*std::max(0.f,std::min(100.f,p.pct))/100.f),10,{40,190,125});}
  }
  box(64,920,1792,90,{20,31,47});text(status.substr(0,90),88,950,2,{230,235,245});text("DOWNLOAD LOCATION  /DATA/PKG/DOWNLOADS",80,1040,2,{125,155,190});
  SDL_RenderPresent(ren);
