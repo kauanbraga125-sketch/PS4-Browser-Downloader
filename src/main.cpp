@@ -59,8 +59,8 @@ void render(){
  box(0,0,SW,SH,{10,16,28});box(0,0,SW,120,{20,65,112});
  text("PS4 TORRENT",64,38,6,{245,248,255});text("BITTORRENT CLIENT",700,55,3,{160,205,245});
  text("TORRENT LIBRARY",80,170,4,{90,190,255});text("UP DOWN SELECT   X START   O STOP   SQUARE REFRESH",80,235,2,{210,220,235});
- int y=310;
- for(int i=0;i<(int)jobs.size()&&i<7;i++,y+=82){bool sel=i==selected;box(64,y,1792,66,sel?SDL_Color{30,75,118}:SDL_Color{22,32,48});text(jobs[i]->name.substr(0,35),92,y+22,3,{245,245,250});
+ int y=310; int first=std::max(0,selected-6);
+ for(int i=first;i<(int)jobs.size()&&i<first+7;i++,y+=82){bool sel=i==selected;box(64,y,1792,66,sel?SDL_Color{30,75,118}:SDL_Color{22,32,48});text(jobs[i]->name.substr(0,35),92,y+22,3,{245,245,250});
   const char*st=jobs[i]->complete.load()?"DONE":jobs[i]->running.load()?"ACTIVE":jobs[i]->failed.load()?"ERROR":"READY";text(st,1300,y+24,2,{150,205,225});
   if(jobs[i]->session){bt::ProgressInfo p{};{std::lock_guard<std::mutex>g(jobs[i]->lock);p=jobs[i]->progress;}text(std::to_string((int)p.pct)+"%",1435,y+24,2,{190,215,235});box(1510,y+26,270,12,{55,65,80});box(1510,y+26,(int)(270*std::max(0.f,std::min(100.f,p.pct))/100.f),12,{40,190,125});}
  }
