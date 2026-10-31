@@ -1,478 +1,85 @@
 #include <SDL2/SDL.h>
-#include <orbis/Bgft.h>
-#include <orbis/Http.h>
-#include <orbis/Net.h>
-#include <orbis/Ssl.h>
-#include <orbis/Sysmodule.h>
-#include <orbis/UserService.h>
-#include <orbis/libkernel.h>
-
+#include "session.hpp"
 #include <algorithm>
-#include <cctype>
+#include <atomic>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <cctype>
+#include <dirent.h>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <sys/stat.h>
+#include <thread>
 #include <vector>
 
 namespace {
-
-static const int SCREEN_W = 1920;
-static const int SCREEN_H = 1080;
-static const uint32_t DIALOG_MAGIC = 0xC0D1A109;
-static const int DIALOG_STATUS_FINISHED = 3;
-static const int DIALOG_RESULT_CALLBACK = 2;
-static const int CALLBACK_TYPE_REGEXP = 2;
-static const int BROWSER_MODE_CUSTOM = 2;
-
-struct CommonDialogBaseParam {
-    size_t size;
-    uint8_t reserved[36];
-    uint32_t magic;
-} __attribute__((aligned(8)));
-
-struct BrowserCallbackInitParam {
-    size_t size;
-    int32_t type;
-    int32_t pad;
-    const char* data;
-    char reserved[32];
+constexpr int SW=1920,SH=1080;
+constexpr const char* TORRENT_DIR="/data/pkg/torrents";
+constexpr const char* DOWNLOAD_DIR="/data/pkg/downloads";
+struct Job {
+ std::string path,name,error; std::unique_ptr<bt::Session> session; std::thread worker;
+ std::mutex lock; bt::ProgressInfo progress{}; std::atomic<bool> running{false},complete{false},failed{false};
 };
-
-struct BrowserImeParam {
-    size_t size;
-    uint32_t option;
-    char reserved[256];
-    int32_t pad;
-};
-
-struct BrowserWebViewParam {
-    size_t size;
-    uint32_t option;
-    char reserved[256];
-    int32_t pad;
-};
-
-struct BrowserParam {
-    CommonDialogBaseParam baseParam;
-    size_t size;
-    int32_t mode;
-    int32_t userId;
-    const char* url;
-    BrowserCallbackInitParam* callbackInitParam;
-    uint16_t width;
-    uint16_t height;
-    uint16_t positionX;
-    uint16_t positionY;
-    uint32_t parts;
-    uint16_t headerWidth;
-    uint16_t headerPositionX;
-    uint16_t headerPositionY;
-    uint16_t pad0;
-    uint32_t control;
-    BrowserImeParam* imeParam;
-    BrowserWebViewParam* webviewParam;
-    uint32_t animation;
-    char reserved[202];
-    uint16_t tailPad;
-};
-
-struct BrowserCallbackResultParam {
-    size_t size;
-    int32_t type;
-    int32_t pad;
-    const char* data;
-    char* buffer;
-    size_t bufferSize;
-    char reserved[32];
-};
-
-struct BrowserResult {
-    int32_t result;
-    int32_t pad;
-    BrowserCallbackResultParam* callbackResultParam;
-    char reserved[240];
-};
-
-using BrowserInitializeFn = int32_t (*)();
-using BrowserTerminateFn = int32_t (*)();
-using BrowserOpenFn = int32_t (*)(const BrowserParam*);
-using BrowserUpdateStatusFn = int32_t (*)();
-using BrowserGetResultFn = int32_t (*)(BrowserResult*);
-using BrowserCloseFn = int32_t (*)();
-
-struct BrowserApi {
-    int32_t module = -1;
-    BrowserInitializeFn initialize = nullptr;
-    BrowserTerminateFn terminate = nullptr;
-    BrowserOpenFn open = nullptr;
-    BrowserUpdateStatusFn updateStatus = nullptr;
-    BrowserGetResultFn getResult = nullptr;
-    BrowserCloseFn close = nullptr;
-};
-
-struct PkgInfo {
-    char contentId[37];
-    uint32_t contentType;
-    uint32_t flags;
-    uint64_t packageSize;
-    bool valid;
-    PkgInfo() : contentType(0), flags(0), packageSize(0), valid(false) { std::memset(contentId, 0, sizeof(contentId)); }
-};
-
-static BrowserApi g_browser;
-static void* g_bgftHeap = nullptr;
-static bool g_bgftInit = false;
-static bool g_httpInit = false;
-static int g_netPool = -1;
-static int g_ssl = -1;
-static int g_http = -1;
-static std::string g_status = "Pronto";
-static std::string g_lastUrl;
-
-static uint32_t be32(const uint8_t* p) {
-    return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | uint32_t(p[3]);
+std::vector<std::unique_ptr<Job>> jobs; int selected=0;
+std::string status="Copy .torrent files to /data/pkg/torrents";
+SDL_Window* win=nullptr; SDL_Renderer* ren=nullptr;
+void box(int x,int y,int w,int h,SDL_Color c){SDL_Rect r{x,y,w,h};SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,255);SDL_RenderFillRect(ren,&r);}
+void text(const std::string&s,int x,int y,int scale,SDL_Color c){
+ // Compact 5x7 font; lowercase is normalized to uppercase.
+ static const unsigned char f[36][5]={
+ {62,65,65,65,62},{127,73,73,73,54},{62,65,65,65,34},{127,65,65,34,28},{127,73,73,73,65},{127,9,9,9,1},{62,65,73,73,122},{127,8,8,8,127},{0,65,127,65,0},{32,64,65,63,1},{127,8,20,34,65},{127,64,64,64,64},{127,2,12,2,127},{127,4,8,16,127},{62,65,65,65,62},{127,9,9,9,6},{62,65,81,33,94},{127,9,25,41,70},{70,73,73,73,49},{1,1,127,1,1},{63,64,64,64,63},{31,32,64,32,31},{63,64,56,64,63},{99,20,8,20,99},{7,8,112,8,7},{97,81,73,69,67},
+ {62,69,73,81,62},{0,66,127,64,0},{98,81,73,73,70},{34,65,73,73,54},{24,20,18,127,16},{47,73,73,73,49},{62,73,73,73,50},{1,113,9,5,3},{54,73,73,73,54},{38,73,73,73,62}};
+ SDL_SetRenderDrawColor(ren,c.r,c.g,c.b,255);
+ for(char ch:s){ch=static_cast<char>(toupper(static_cast<unsigned char>(ch)));int idx=ch>='A'&&ch<='Z'?ch-'A':(ch>='0'&&ch<='9'?26+ch-'0':-1);
+  if(idx>=0)for(int a=0;a<5;a++)for(int b=0;b<7;b++)if(f[idx][a]&(1<<b)){SDL_Rect p{x+a*scale,y+b*scale,scale,scale};SDL_RenderFillRect(ren,&p);}
+  x+=6*scale;
+ }
 }
-static uint64_t be64(const uint8_t* p) {
-    return (uint64_t(be32(p)) << 32) | uint64_t(be32(p + 4));
+std::string base(const std::string&p){auto n=p.find_last_of('/');return n==std::string::npos?p:p.substr(n+1);}
+void scan(){
+ DIR*d=opendir(TORRENT_DIR);if(!d){status="Torrent folder unavailable";return;}
+ std::vector<std::string> found;dirent*e;
+ while((e=readdir(d))){std::string n=e->d_name;if(n.size()>=8){std::string ext=n.substr(n.size()-8);std::transform(ext.begin(),ext.end(),ext.begin(),::tolower);if(ext==".torrent")found.push_back(std::string(TORRENT_DIR)+"/"+n);}}
+ closedir(d);std::sort(found.begin(),found.end());
+ for(const auto&p:found){bool seen=false;for(const auto&j:jobs)if(j->path==p)seen=true;if(!seen){auto j=std::make_unique<Job>();j->path=p;j->name=base(p);jobs.push_back(std::move(j));}}
+ if(selected>=static_cast<int>(jobs.size()))selected=std::max(0,static_cast<int>(jobs.size())-1);
+ status="Library refreshed";
 }
-
-static std::string hex32(int32_t v) {
-    char b[32];
-    std::snprintf(b, sizeof(b), "0x%08X", static_cast<uint32_t>(v));
-    return b;
+void start(){
+ if(jobs.empty()){status="No torrent files found";return;}Job&j=*jobs[selected];
+ if(j.running.load()||j.complete.load()){status="Already active or complete";return;}\n if(j.worker.joinable())j.worker.join();
+ try{j.session=std::make_unique<bt::Session>(j.path,DOWNLOAD_DIR);}catch(const std::exception&e){j.error=e.what();j.failed.store(true);status="Torrent parse failed";return;}
+ j.session->set_progress_callback([p=&j](const bt::ProgressInfo&i){std::lock_guard<std::mutex>g(p->lock);p->progress=i;});
+ j.running.store(true);j.failed.store(false);j.error.clear();
+ j.worker=std::thread([p=&j](){try{p->session->start();p->complete.store(p->session->is_complete());}catch(const std::exception&e){p->error=e.what();p->failed.store(true);}p->running.store(false);});
+ status="Starting torrent";
 }
-
-static bool dlsym_required(int32_t h, const char* name, void** out) {
-    const int32_t r = sceKernelDlsym(h, name, out);
-    if (r < 0 || !*out) {
-        g_status = std::string("Falha ao localizar ") + name + " (" + hex32(r) + ")";
-        return false;
-    }
-    return true;
+void stop(){if(jobs.empty())return;Job&j=*jobs[selected];if(j.session&&j.running.load()){status="Stop requested";j.session->stop();}else status="Torrent is not running";}
+void render(){
+ box(0,0,SW,SH,{10,16,28});box(0,0,SW,120,{20,65,112});
+ text("PS4 TORRENT",64,38,6,{245,248,255});text("BITTORRENT CLIENT",700,55,3,{160,205,245});
+ text("TORRENT LIBRARY",80,170,4,{90,190,255});text("UP DOWN SELECT   X START   O STOP   SQUARE REFRESH",80,235,2,{210,220,235});
+ int y=310; int first=std::max(0,selected-6);
+ for(int i=first;i<(int)jobs.size()&&i<first+7;i++,y+=82){bool sel=i==selected;box(64,y,1792,66,sel?SDL_Color{30,75,118}:SDL_Color{22,32,48});text(jobs[i]->name.substr(0,35),92,y+22,3,{245,245,250});
+  const char*st=jobs[i]->complete.load()?"DONE":jobs[i]->running.load()?"ACTIVE":jobs[i]->failed.load()?"ERROR":"READY";text(st,1300,y+24,2,{150,205,225});
+  if(jobs[i]->session){bt::ProgressInfo p{};{std::lock_guard<std::mutex>g(jobs[i]->lock);p=jobs[i]->progress;}text(std::to_string((int)p.pct)+"%",1435,y+24,2,{190,215,235});char rate[32];std::snprintf(rate,sizeof(rate),"%.1f MB/S",p.speed_bps/(1024.0*1024.0));text("PEERS "+std::to_string(p.peers_active),1300,y+46,1,{145,170,195});text(rate,1510,y+44,1,{145,190,175});box(1510,y+26,270,10,{55,65,80});box(1510,y+26,(int)(270*std::max(0.f,std::min(100.f,p.pct))/100.f),10,{40,190,125});}
+ }
+ box(64,920,1792,90,{20,31,47});text(status.substr(0,90),88,950,2,{230,235,245});text("DOWNLOAD LOCATION  /DATA/PKG/DOWNLOADS",80,1040,2,{125,155,190});
+ SDL_RenderPresent(ren);
 }
-
-static int32_t load_system_module(const char* name) {
-    char path[256];
-    std::snprintf(path, sizeof(path), "/system/common/lib/%s", name);
-    int32_t h = static_cast<int32_t>(sceKernelLoadStartModule(path, 0, nullptr, 0, nullptr, nullptr));
-    if (h >= 0) return h;
-    const char* word = sceKernelGetFsSandboxRandomWord();
-    if (word && *word) {
-        std::snprintf(path, sizeof(path), "/%s/common/lib/%s", word, name);
-        h = static_cast<int32_t>(sceKernelLoadStartModule(path, 0, nullptr, 0, nullptr, nullptr));
-    }
-    return h;
 }
-
-static bool init_browser() {
-    if (g_browser.module >= 0) return true;
-    g_browser.module = load_system_module("libSceWebBrowserDialog.sprx");
-    if (g_browser.module < 0) {
-        g_status = "Nao foi possivel carregar WebBrowserDialog: " + hex32(g_browser.module);
-        return false;
-    }
-    if (!dlsym_required(g_browser.module, "sceWebBrowserDialogInitialize", (void**)&g_browser.initialize) ||
-        !dlsym_required(g_browser.module, "sceWebBrowserDialogTerminate", (void**)&g_browser.terminate) ||
-        !dlsym_required(g_browser.module, "sceWebBrowserDialogOpen", (void**)&g_browser.open) ||
-        !dlsym_required(g_browser.module, "sceWebBrowserDialogUpdateStatus", (void**)&g_browser.updateStatus) ||
-        !dlsym_required(g_browser.module, "sceWebBrowserDialogGetResult", (void**)&g_browser.getResult) ||
-        !dlsym_required(g_browser.module, "sceWebBrowserDialogClose", (void**)&g_browser.close)) return false;
-    int32_t r = g_browser.initialize();
-    if (r != 0) {
-        g_status = "WebBrowserDialog init falhou: " + hex32(r);
-        return false;
-    }
-    return true;
-}
-
-static bool init_network() {
-    if (g_httpInit) return true;
-    if (sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_NET) < 0 ||
-        sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_HTTP) < 0 ||
-        sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_SSL) < 0) {
-        g_status = "Falha ao carregar modulos de rede";
-        return false;
-    }
-    sceNetInit();
-    g_netPool = sceNetPoolCreate("PBDLNet", 128 * 1024, 0);
-    if (g_netPool < 0) { g_status = "sceNetPoolCreate: " + hex32(g_netPool); return false; }
-    g_ssl = sceSslInit(1024 * 1024);
-    if (g_ssl < 0) { g_status = "sceSslInit: " + hex32(g_ssl); return false; }
-    g_http = sceHttpInit(g_netPool, g_ssl, 1024 * 1024);
-    if (g_http < 0) { g_status = "sceHttpInit: " + hex32(g_http); return false; }
-    g_httpInit = true;
-    return true;
-}
-
-static bool fetch_pkg_header(const std::string& url, PkgInfo& info) {
-    if (!init_network()) return false;
-    const int tmpl = sceHttpCreateTemplate(g_http, "PS4BrowserDownloader/1.0", ORBIS_HTTP_VERSION_1_1, 1);
-    if (tmpl < 0) { g_status = "HTTP template: " + hex32(tmpl); return false; }
-    const int conn = sceHttpCreateConnectionWithURL(tmpl, url.c_str(), true);
-    if (conn < 0) { sceHttpDeleteTemplate(tmpl); g_status = "HTTP connection: " + hex32(conn); return false; }
-    const int req = sceHttpCreateRequestWithURL(conn, ORBIS_METHOD_GET, url.c_str(), 0);
-    if (req < 0) { sceHttpDeleteConnection(conn); sceHttpDeleteTemplate(tmpl); g_status = "HTTP request: " + hex32(req); return false; }
-    sceHttpAddRequestHeader(req, "Range", "bytes=0-8191", 1);
-    int32_t r = sceHttpSendRequest(req, nullptr, 0);
-    if (r < 0) {
-        g_status = "Falha HTTP: " + hex32(r);
-        sceHttpDeleteRequest(req); sceHttpDeleteConnection(conn); sceHttpDeleteTemplate(tmpl); return false;
-    }
-    int32_t code = 0;
-    sceHttpGetStatusCode(req, &code);
-    if (code != 200 && code != 206) {
-        char b[64]; std::snprintf(b, sizeof(b), "Servidor respondeu HTTP %d", code); g_status = b;
-        sceHttpDeleteRequest(req); sceHttpDeleteConnection(conn); sceHttpDeleteTemplate(tmpl); return false;
-    }
-    std::vector<uint8_t> data(8192);
-    size_t got = 0;
-    while (got < data.size()) {
-        int n = sceHttpReadData(req, data.data() + got, static_cast<uint32_t>(data.size() - got));
-        if (n < 0) { g_status = "Erro lendo cabecalho PKG: " + hex32(n); break; }
-        if (n == 0) break;
-        got += static_cast<size_t>(n);
-    }
-    sceHttpDeleteRequest(req); sceHttpDeleteConnection(conn); sceHttpDeleteTemplate(tmpl);
-    if (got < 0x438) return false;
-    if (!(data[0] == 0x7F && data[1] == 'C' && data[2] == 'N' && data[3] == 'T')) {
-        g_status = "O link nao aponta para um PKG PS4 valido";
-        return false;
-    }
-    std::memcpy(info.contentId, data.data() + 0x40, 36);
-    info.contentId[36] = 0;
-    info.contentType = be32(data.data() + 0x74);
-    info.flags = be32(data.data() + 0x78);
-    info.packageSize = be64(data.data() + 0x430);
-    info.valid = info.packageSize > 0 && std::strlen(info.contentId) >= 19;
-    if (!info.valid) g_status = "Cabecalho PKG incompleto";
-    return info.valid;
-}
-
-struct BgftDownloadParam64 {
-    int32_t userId;
-    int32_t entitlementType;
-    const char* id;
-    const char* contentUrl;
-    const char* contentExUrl;
-    const char* contentName;
-    const char* iconPath;
-    const char* skuId;
-    uint32_t option;
-    uint32_t pad;
-    const char* playgoScenarioId;
-    const char* releaseDate;
-    const char* packageType;
-    const char* packageSubType;
-    unsigned long packageSize;
-};
-
-static bool init_bgft() {
-    if (g_bgftInit) return true;
-    const char* modules[] = {"libSceSystemService.sprx", "libSceAppInstUtil.sprx", "libSceSysUtil.sprx", "libSceBgft.sprx"};
-    for (const char* m : modules) {
-        int32_t h = load_system_module(m);
-        if (h < 0) { g_status = std::string("Falha carregando ") + m + ": " + hex32(h); return false; }
-    }
-    sceUserServiceInitialize(nullptr);
-    g_bgftHeap = std::malloc(1024 * 1024);
-    if (!g_bgftHeap) { g_status = "Sem memoria para BGFT"; return false; }
-    std::memset(g_bgftHeap, 0, 1024 * 1024);
-    OrbisBgftInitParams p{};
-    p.heap = g_bgftHeap;
-    p.heapSize = 1024 * 1024;
-    int32_t r = sceBgftServiceIntInit(&p);
-    if (r != 0) { g_status = "BGFT init: " + hex32(r); return false; }
-    g_bgftInit = true;
-    return true;
-}
-
-static bool is_patch(uint32_t flags) {
-    return (flags & 0x00100000) || (flags & 0x40000000) || (flags & 0x41000000) || (flags & 0x60000000);
-}
-
-static const char* package_type(uint32_t type) {
-    switch (type) {
-        case 0x1A: return "PS4GD";
-        case 0x1B: return "PS4AC";
-        case 0x1C: return "PS4AL";
-        case 0x1E: return "PS4DP";
-        default: return nullptr;
-    }
-}
-
-static bool queue_bgft(const std::string& url) {
-    g_status = "Validando PKG...";
-    PkgInfo info;
-    if (!fetch_pkg_header(url, info)) return false;
-    const char* ptype = package_type(info.contentType);
-    if (!ptype) { g_status = "Tipo de PKG nao suportado"; return false; }
-    if (!init_bgft()) return false;
-    int32_t user = 0;
-    sceUserServiceGetInitialUser(&user);
-    std::string title = info.contentId;
-    BgftDownloadParam64 p{};
-    p.userId = user;
-    p.entitlementType = 5;
-    p.id = info.contentId;
-    p.contentUrl = url.c_str();
-    p.contentExUrl = "";
-    p.contentName = title.c_str();
-    p.iconPath = "/app0/sce_sys/icon0.png";
-    p.skuId = "";
-    p.option = 0x10000; // disable CDN query parameter
-    p.playgoScenarioId = "0";
-    p.releaseDate = "";
-    p.packageType = ptype;
-    p.packageSubType = "";
-    p.packageSize = static_cast<unsigned long>(info.packageSize);
-
-    int task = -1;
-    int32_t r;
-    if (is_patch(info.flags))
-        r = sceBgftServiceIntDebugDownloadRegisterPkg(reinterpret_cast<OrbisBgftDownloadParam*>(&p), &task);
-    else
-        r = sceBgftServiceIntDownloadRegisterTask(reinterpret_cast<OrbisBgftDownloadParam*>(&p), &task);
-    if (r != 0) { g_status = "BGFT register: " + hex32(r); return false; }
-    r = sceBgftServiceDownloadStartTask(task);
-    if (r != 0) {
-        sceBgftServiceIntDownloadUnregisterTask(task);
-        g_status = "BGFT start: " + hex32(r);
-        return false;
-    }
-    char msg[160];
-    std::snprintf(msg, sizeof(msg), "Download enviado ao PS4 (task %d). Pode fechar o app.", task);
-    g_status = msg;
-    g_lastUrl = url;
-    return true;
-}
-
-static bool looks_like_pkg(std::string u) {
-    std::transform(u.begin(), u.end(), u.begin(), [](unsigned char c){ return static_cast<char>(std::tolower(c)); });
-    const size_t q = u.find_first_of("?#");
-    if (q != std::string::npos) u.resize(q);
-    return u.size() >= 4 && u.substr(u.size() - 4) == ".pkg";
-}
-
-static bool open_browser_and_wait() {
-    if (!init_browser()) return false;
-    int32_t user = 0;
-    sceUserServiceGetInitialUser(&user);
-
-    static const char* startUrl = "https://www.google.com/";
-    static const char* callbackRegex = "https?://.*\\.pkg([?#].*)?$";
-    BrowserCallbackInitParam cb{};
-    cb.size = sizeof(cb);
-    cb.type = CALLBACK_TYPE_REGEXP;
-    cb.data = callbackRegex;
-
-    BrowserImeParam ime{};
-    ime.size = sizeof(ime);
-    ime.option = 0;
-
-    BrowserParam p{};
-    p.baseParam.size = sizeof(CommonDialogBaseParam);
-    p.baseParam.magic = DIALOG_MAGIC + static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&p.baseParam));
-    p.size = sizeof(p);
-    p.mode = BROWSER_MODE_CUSTOM;
-    p.userId = user;
-    p.url = startUrl;
-    p.callbackInitParam = &cb;
-    p.width = 1920;
-    p.height = 963;
-    p.positionX = 0;
-    p.positionY = 117;
-    p.parts = 0x3; // title + address
-    p.headerWidth = 1920;
-    p.control = 0x7F; // exit/reload/back/forward/zoom/options family
-    p.imeParam = &ime;
-    p.animation = 0;
-
-    int32_t r = g_browser.open(&p);
-    if (r != 0) { g_status = "Browser open: " + hex32(r); return false; }
-
-    g_status = "Navegador aberto. Ao acessar um link .pkg, ele sera enviado ao BGFT.";
-    for (;;) {
-        const int32_t st = g_browser.updateStatus();
-        if (st == DIALOG_STATUS_FINISHED) break;
-        SDL_Delay(16);
-    }
-
-    BrowserCallbackResultParam cbout{};
-    cbout.size = sizeof(cbout);
-    BrowserResult result{};
-    result.callbackResultParam = &cbout;
-    r = g_browser.getResult(&result);
-    std::string captured;
-    if (r == 0 && result.result == DIALOG_RESULT_CALLBACK && cbout.data) captured = cbout.data;
-    if (captured.empty() && cbout.buffer && cbout.bufferSize) captured.assign(cbout.buffer, cbout.bufferSize);
-    g_browser.close();
-
-    if (!captured.empty() && looks_like_pkg(captured)) {
-        g_status = "Link PKG capturado. Preparando download...";
-        return queue_bgft(captured);
-    }
-    g_status = "Navegador fechado sem capturar um link .pkg";
-    return true;
-}
-
-static void fill(SDL_Renderer* r, int x, int y, int w, int h, uint8_t rr, uint8_t gg, uint8_t bb) {
-    SDL_Rect rc{x,y,w,h};
-    SDL_SetRenderDrawColor(r, rr,gg,bb,255);
-    SDL_RenderFillRect(r,&rc);
-}
-
-static void draw_bar(SDL_Renderer* r) {
-    fill(r, 0,0,SCREEN_W,SCREEN_H, 12,18,30);
-    fill(r, 0,0,SCREEN_W,130, 24,83,170);
-    fill(r, 160,260,1600,180, 22,30,45);
-    fill(r, 160,500,1600,180, 22,30,45);
-    fill(r, 160,815,1600,130, 20,28,40);
-}
-
-static void set_title(SDL_Window* w) {
-    std::string t = "PS4 Browser Downloader | " + g_status;
-    SDL_SetWindowTitle(w, t.c_str());
-}
-
-} // namespace
-
-int main() {
-    setvbuf(stdout, nullptr, _IONBF, 0);
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK) != 0) return 1;
-    SDL_Window* win = SDL_CreateWindow("PS4 Browser Downloader", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_W, SCREEN_H, 0);
-    if (!win) return 2;
-    SDL_Surface* s = SDL_GetWindowSurface(win);
-    SDL_Renderer* r = SDL_CreateSoftwareRenderer(s);
-    if (!r) return 3;
-    if (SDL_NumJoysticks() > 0) SDL_JoystickOpen(0);
-    g_status = "X: abrir navegador | O: sair";
-
-    bool running = true;
-    while (running) {
-        SDL_Event e;
-        while (SDL_PollEvent(&e)) {
-            if (e.type == SDL_QUIT) running = false;
-            if (e.type == SDL_JOYBUTTONDOWN) {
-                if (e.jbutton.button == 0) open_browser_and_wait();
-                else if (e.jbutton.button == 1) running = false;
-            }
-            if (e.type == SDL_KEYDOWN) {
-                if (e.key.keysym.sym == SDLK_RETURN) open_browser_and_wait();
-                else if (e.key.keysym.sym == SDLK_ESCAPE) running = false;
-            }
-        }
-        draw_bar(r);
-        SDL_RenderPresent(r);
-        SDL_UpdateWindowSurface(win);
-        set_title(win);
-        SDL_Delay(16);
-    }
-
-    if (g_browser.terminate) g_browser.terminate();
-    if (g_bgftInit) sceBgftServiceIntTerm();
-    if (g_bgftHeap) std::free(g_bgftHeap);
-    if (g_httpInit) { sceHttpTerm(g_http); sceSslTerm(); sceNetPoolDestroy(g_netPool); }
-    SDL_Quit();
-    return 0;
+int main(){
+ setvbuf(stdout,nullptr,_IONBF,0);mkdir(TORRENT_DIR,0777);mkdir(DOWNLOAD_DIR,0777);
+ if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_JOYSTICK)!=0)return 1;
+ win=SDL_CreateWindow("PS4 Torrent",SDL_WINDOWPOS_UNDEFINED,SDL_WINDOWPOS_UNDEFINED,SW,SH,0);if(!win){SDL_Quit();return 2;}
+ ren=SDL_CreateSoftwareRenderer(SDL_GetWindowSurface(win));if(!ren){SDL_DestroyWindow(win);SDL_Quit();return 3;}
+ if(SDL_NumJoysticks()>0)SDL_JoystickOpen(0);scan();bool alive=true;
+ while(alive){SDL_Event e;while(SDL_PollEvent(&e)){
+  if(e.type==SDL_QUIT)alive=false;
+  if(e.type==SDL_JOYBUTTONDOWN){if(e.jbutton.button==0)start();else if(e.jbutton.button==1)stop();else if(e.jbutton.button==2)scan();else if(e.jbutton.button==6)alive=false;else if(e.jbutton.button==11&&!jobs.empty())selected=(selected+(int)jobs.size()-1)%jobs.size();else if(e.jbutton.button==12&&!jobs.empty())selected=(selected+1)%jobs.size();}
+  if(e.type==SDL_JOYHATMOTION){if(e.jhat.value&SDL_HAT_UP&&!jobs.empty())selected=(selected+(int)jobs.size()-1)%jobs.size();if(e.jhat.value&SDL_HAT_DOWN&&!jobs.empty())selected=(selected+1)%jobs.size();}
+  if(e.type==SDL_KEYDOWN){auto k=e.key.keysym.sym;if(k==SDLK_UP&&!jobs.empty())selected=(selected+(int)jobs.size()-1)%jobs.size();else if(k==SDLK_DOWN&&!jobs.empty())selected=(selected+1)%jobs.size();else if(k==SDLK_RETURN)start();else if(k==SDLK_BACKSPACE)stop();else if(k==SDLK_r)scan();else if(k==SDLK_ESCAPE)alive=false;}
+ }render();SDL_UpdateWindowSurface(win);SDL_Delay(33);}
+ for(auto&j:jobs)if(j->session&&j->running.load())j->session->stop();for(auto&j:jobs)if(j->worker.joinable())j->worker.join();
+ SDL_DestroyRenderer(ren);SDL_DestroyWindow(win);SDL_Quit();return 0;
 }
