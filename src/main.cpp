@@ -2,6 +2,7 @@
 #include "session.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include <dirent.h>
 #include <memory>
 #include <mutex>
